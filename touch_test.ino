@@ -45,6 +45,62 @@ public:
 LGFX_CYD lcd;
 
 // =====================================================
+// XPT2046 Touch Driver — software bit-bang SPI
+// (Same as kmb-eta-display.ino)
+// =====================================================
+#define T_CLK 26
+#define T_MOSI 32
+#define T_MISO 39
+#define T_CS 33
+
+#define XPT2046_CMD_X  0x90
+#define XPT2046_CMD_Y  0xD0
+#define XPT2046_CMD_Z1 0xB0
+
+void touchInit() {
+  pinMode(T_CLK, OUTPUT);
+  pinMode(T_MOSI, OUTPUT);
+  pinMode(T_MISO, INPUT);
+  pinMode(T_CS, OUTPUT);
+  digitalWrite(T_CS, HIGH);
+  digitalWrite(T_CLK, LOW);
+  digitalWrite(T_MOSI, LOW);
+  Serial.println("【Touch】XPT2046 init done (software bit-bang SPI)");
+}
+
+uint16_t touchReadRaw(uint8_t cmd) {
+  digitalWrite(T_CS, LOW);
+  for (int i = 7; i >= 0; i--) {
+    digitalWrite(T_MOSI, (cmd >> i) & 1);
+    digitalWrite(T_CLK, HIGH);
+    delayMicroseconds(2);
+    digitalWrite(T_CLK, LOW);
+    delayMicroseconds(2);
+  }
+  uint16_t result = 0;
+  for (int i = 11; i >= 0; i--) {
+    digitalWrite(T_CLK, HIGH);
+    delayMicroseconds(2);
+    if (digitalRead(T_MISO)) {
+      result |= (1 << i);
+    }
+    digitalWrite(T_CLK, LOW);
+    delayMicroseconds(2);
+  }
+  digitalWrite(T_CLK, HIGH);
+  delayMicroseconds(2);
+  digitalWrite(T_CLK, LOW);
+  delayMicroseconds(2);
+  digitalWrite(T_CS, HIGH);
+  return result;
+}
+
+bool touchIsPressed() {
+  uint16_t z1 = touchReadRaw(XPT2046_CMD_Z1);
+  return z1 > 50;
+}
+
+// =====================================================
 // Grid geometry
 // =====================================================
 const int TITLE_H = 20;
@@ -156,11 +212,19 @@ void setup() {
   lcd.setRotation(1);
   lcd.fillScreen(TFT_BLACK);
 
+  touchInit();
+
   drawTitleBar();
   drawGrid();
   drawFooter();
 }
 
+unsigned long lastHeartbeat = 0;
+
 void loop() {
-  delay(1000);
+  if (millis() - lastHeartbeat >= 1000) {
+    lastHeartbeat = millis();
+    uint16_t z1 = touchReadRaw(XPT2046_CMD_Z1);
+    Serial.printf("【Heartbeat】Z1=%u (pressed=%s)\n", z1, z1 > 50 ? "YES" : "no");
+  }
 }
