@@ -100,6 +100,21 @@ bool touchIsPressed() {
   return z1 > 50;
 }
 
+bool touchGetPoint(int* x, int* y) {
+  // Warm-up reads
+  touchReadRaw(XPT2046_CMD_X);
+  touchReadRaw(XPT2046_CMD_Y);
+  // 5-sample average
+  uint32_t sumX = 0, sumY = 0;
+  for (int i = 0; i < 5; i++) {
+    sumX += touchReadRaw(XPT2046_CMD_X);
+    sumY += touchReadRaw(XPT2046_CMD_Y);
+  }
+  *x = sumX / 5;
+  *y = sumY / 5;
+  return (*x > 200 && *x < 3900 && *y > 200 && *y < 3900);
+}
+
 // =====================================================
 // Grid geometry
 // =====================================================
@@ -129,6 +144,21 @@ struct ZoneState {
   uint16_t taps = 0;
 };
 ZoneState zones[NUM_ZONES];
+
+// =====================================================
+// Map raw X/Y to grid zone index (0..15), or -1 if outside
+// =====================================================
+int classifyZone(int rawX, int rawY) {
+  // Map raw range to screen pixels (240×320, rotation=1 landscape)
+  int px = map(rawX, 200, 3900, 0, 319);
+  int py = map(rawY, 200, 3900, 0, 239);
+  // Subtract title bar
+  py -= TITLE_H;
+  if (py < 0 || py >= GRID_BOTTOM - GRID_TOP) return -1;
+  int col = constrain(px / CELL_W, 0, GRID_COLS - 1);
+  int row = constrain(py / CELL_H, 0, GRID_ROWS - 1);
+  return row * GRID_COLS + col;
+}
 
 // =====================================================
 // Draw title bar
@@ -222,9 +252,20 @@ void setup() {
 unsigned long lastHeartbeat = 0;
 
 void loop() {
+  if (touchIsPressed()) {
+    int x, y;
+    if (touchGetPoint(&x, &y)) {
+      int zone = classifyZone(x, y);
+      Serial.printf("【Touch】raw X=%d Y=%d → zone=%d\n", x, y, zone);
+    } else {
+      Serial.printf("【Touch】raw X=%d Y=%d → invalid range\n", x, y);
+    }
+    // Hold off re-reads while finger is down (debounce)
+    delay(300);
+  }
   if (millis() - lastHeartbeat >= 1000) {
     lastHeartbeat = millis();
     uint16_t z1 = touchReadRaw(XPT2046_CMD_Z1);
-    Serial.printf("【Heartbeat】Z1=%u (pressed=%s)\n", z1, z1 > 50 ? "YES" : "no");
+    Serial.printf("【Heartbeat】Z1=%u\n", z1);
   }
 }
