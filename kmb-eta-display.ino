@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <time.h>
 #include <WebServer.h>
+#include <Update.h>
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
@@ -164,6 +165,34 @@ const long pageInterval = 15000;       // 15 秒自動翻頁
 const long marqueeInterval = 50;       // 跑馬燈刷新率
 const float scrollSpeed = 1.5;         // 跑馬燈速度 (像素/幀)
 const long weatherInterval = 900000;   // 15 分鐘更新天氣
+
+// =====================================================
+// OTA — GitHub Releases
+// =====================================================
+#define FIRMWARE_VERSION   "1.0.0"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define GITHUB_USER        "Anthony114hk"          // GitHub username
+#define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
+#define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
+#define LONG_PRESS_MS      10000                   // 長按 10 秒觸發 OTA page
+#define OTA_UPDATE_MAGIC   0x45555354              // "EUST" magic — 升級後寫住防止 boot loop
+
+// OTA state
+enum OtaState {
+  OTA_IDLE = 0,
+  OTA_CHECKING,    // check GitHub API 中
+  OTA_AVAILABLE,   // 搵到新版本
+  OTA_UPTODATE,    // 已係最新
+  OTA_FAILED,      // check 失敗 (network / JSON)
+  OTA_DOWNLOADING, // 下載 + flash 中
+  OTA_SUCCESS,     // 成功，1 秒後 reboot
+  OTA_ERROR        // flash 失敗
+};
+
+OtaState otaState = OTA_IDLE;
+String otaLatestVersion = "";
+String otaBinUrl = "";
+int otaProgress = 0;            // 0-100
+unsigned long otaTouchDown = 0;  // long-press timer
 
 // =====================================================
 // 資料結構
@@ -1182,6 +1211,320 @@ void enterConfigMode(bool blocking) {
 }
 
 // =====================================================
+// OTA: 檢查 GitHub 最新 release
+// =====================================================
+void checkLatestRelease() {
+  if (WiFi.status() != WL_CONNECTED) {
+    otaState = OTA_FAILED;
+    Serial.println("【OTA】WiFi 斷線，無法 check");
+    return;
+  }
+
+  otaState = OTA_CHECKING;
+  otaLatestVersion = "";
+  otaBinUrl = "";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = "https://api.github.com/repos/" GITHUB_USER "/" GITHUB_REPO "/releases/latest";
+  http.setTimeout(10000);
+  http.addHeader("User-Agent", "ESP32-OTA-Checker");
+  http.addHeader("Accept", "application/vnd.github+json");
+
+  Serial.printf("【OTA】GET %s\n", url.c_str());
+  if (!http.begin(client, url)) {
+    otaState = OTA_FAILED;
+    Serial.println("【OTA】http.begin() 失敗");
+    return;
+  }
+
+  int code = http.GET();
+  Serial.printf("【OTA】HTTP code: %d\n", code);
+  if (code != HTTP_CODE_OK) {
+    otaState = OTA_FAILED;
+    http.end();
+    return;
+  }
+
+  String body = http.getString();
+  http.end();
+  Serial.printf("【OTA】Got %d bytes\n", body.length());
+
+  DynamicJsonDocument doc(8192);
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    Serial.printf("【OTA】JSON 解析失敗: %s\n", err.c_str());
+    otaState = OTA_FAILED;
+    return;
+  }
+
+  otaLatestVersion = doc["tag_name"].as<String>();
+
+  // 搵 asset .bin URL
+  JsonArray assets = doc["assets"].as<JsonArray>();
+  for (JsonObject a : assets) {
+    if (String(a["name"].as<const char*>()) == OTA_ASSET_NAME) {
+      otaBinUrl = a["browser_download_url"].as<String>();
+      break;
+    }
+  }
+
+  if (otaBinUrl == "") {
+    Serial.printf("【OTA】⚠ 找不到 asset '%s'\n", OTA_ASSET_NAME);
+    otaState = OTA_FAILED;
+    return;
+  }
+
+  Serial.printf("【OTA】latest=%s, current=%s, url=%s\n",
+                otaLatestVersion.c_str(), FIRMWARE_VERSION, otaBinUrl.c_str());
+
+  if (otaLatestVersion == FIRMWARE_VERSION) {
+    otaState = OTA_UPTODATE;
+  } else {
+    otaState = OTA_AVAILABLE;
+  }
+}
+
+// =====================================================
+// OTA: 下載 .bin + flash (blocking，畫面會 freeze 直至完成)
+// =====================================================
+void performOTA(String binUrl) {
+  otaState = OTA_DOWNLOADING;
+  otaProgress = 0;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(30000);
+  Serial.printf("【OTA】下載中: %s\n", binUrl.c_str());
+
+  if (!http.begin(client, binUrl)) {
+    otaState = OTA_ERROR;
+    Serial.println("【OTA】http.begin() 失敗");
+    return;
+  }
+
+  int code = http.GET();
+  Serial.printf("【OTA】HTTP code: %d\n", code);
+  if (code != HTTP_CODE_OK) {
+    otaState = OTA_ERROR;
+    http.end();
+    return;
+  }
+
+  int total = http.getSize();
+  Serial.printf("【OTA】size=%d bytes\n", total);
+  if (total <= 0 || total > 2 * 1024 * 1024) {
+    Serial.println("【OTA】size 異常 (要 <= 2MB)");
+    otaState = OTA_ERROR;
+    http.end();
+    return;
+  }
+
+  if (!Update.begin(total)) {
+    Serial.printf("【OTA】Update.begin() 失敗: %s\n", Update.errorString());
+    otaState = OTA_ERROR;
+    http.end();
+    return;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  uint8_t buf[1024];
+  int written = 0;
+  int lastReportedPct = -1;
+
+  while (written < total) {
+    int toRead = min((int)sizeof(buf), total - written);
+    int read = stream->readBytes(buf, toRead);
+    if (read <= 0) {
+      Serial.println("【OTA】read 提前 EOF");
+      otaState = OTA_ERROR;
+      Update.abort();
+      http.end();
+      return;
+    }
+    if (Update.write(buf, read) != read) {
+      Serial.printf("【OTA】Update.write() 失敗: %s\n", Update.errorString());
+      otaState = OTA_ERROR;
+      Update.abort();
+      http.end();
+      return;
+    }
+    written += read;
+
+    int pct = (written * 100) / total;
+    if (pct != lastReportedPct && pct % 10 == 0) {
+      lastReportedPct = pct;
+      Serial.printf("【OTA】%d%% (%d/%d bytes)\n", pct, written, total);
+      otaProgress = pct;
+    }
+  }
+
+  if (!Update.end()) {
+    Serial.printf("【OTA】Update.end() 失敗: %s\n", Update.errorString());
+    otaState = OTA_ERROR;
+    http.end();
+    return;
+  }
+
+  http.end();
+  otaProgress = 100;
+  otaState = OTA_SUCCESS;
+  Serial.println("【OTA】✓ flash 成功，1 秒後 reboot");
+  delay(1000);
+  ESP.restart();
+}
+
+// =====================================================
+// Touch 座標映射: raw XPT2046 (12-bit) → LCD pixels (rotation 1 = 320x240 landscape)
+// =====================================================
+bool mapTouchToLCD(int rawX, int rawY, int* lcdX, int* lcdY) {
+  // CYD raw range typically: X 200-3900, Y 200-3900
+  // Rotation 1: width=320, height=240
+  // X 軸可能要 swap (視乎 CYD 版本)
+  int x = map(rawX, 200, 3900, 0, 320);
+  int y = map(rawY, 200, 3900, 0, 240);
+  // Clamp
+  if (x < 0) x = 0; if (x > 319) x = 319;
+  if (y < 0) y = 0; if (y > 239) y = 239;
+  *lcdX = x;
+  *lcdY = y;
+  return true;
+}
+
+// =====================================================
+// OTA UI Page — 顯示版本資訊 + 升級按鈕
+// =====================================================
+void drawOTAPage() {
+  lcd.fillScreen(TFT_BLACK);
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+
+  // Title
+  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  lcd.setCursor(10, 5);
+  lcd.println("🔄 OTA 線上更新");
+
+  lcd.drawFastHLine(0, 25, 320, TFT_DARKGREY);
+
+  // 版本資訊
+  int y = 40;
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setCursor(10, y);
+  lcd.printf("目前版本: v%s", FIRMWARE_VERSION);
+  y += 22;
+
+  lcd.setCursor(10, y);
+  lcd.print("最新版本: ");
+  switch (otaState) {
+    case OTA_CHECKING:
+      lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+      lcd.println("檢查中...");
+      break;
+    case OTA_AVAILABLE:
+      lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+      lcd.printf("v%s ✓ 有更新\n", otaLatestVersion.c_str());
+      break;
+    case OTA_UPTODATE:
+      lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+      lcd.printf("v%s ✓ 已是最新\n", otaLatestVersion.c_str());
+      break;
+    case OTA_FAILED:
+      lcd.setTextColor(TFT_RED, TFT_BLACK);
+      lcd.println("✗ 檢查失敗");
+      break;
+    default:
+      lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      lcd.println("--");
+  }
+  y += 22;
+
+  // 狀態訊息
+  lcd.setCursor(10, y);
+  switch (otaState) {
+    case OTA_DOWNLOADING:
+      lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+      lcd.printf("下載中... %d%%", otaProgress);
+      // 進度條
+      lcd.drawRect(10, y + 22, 300, 12, TFT_WHITE);
+      lcd.fillRect(12, y + 24, (otaProgress * 296) / 100, 8, TFT_GREEN);
+      y += 40;
+      break;
+    case OTA_SUCCESS:
+      lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+      lcd.println("✓ 升級成功！重新啟動中...");
+      y += 22;
+      break;
+    case OTA_ERROR:
+      lcd.setTextColor(TFT_RED, TFT_BLACK);
+      lcd.println("✗ 升級失敗，請重試");
+      y += 22;
+      break;
+    default:
+      y += 22;
+      break;
+  }
+
+  // 升級按鈕 — 110x35, (105, 165)
+  lcd.drawRect(105, 165, 110, 35, TFT_WHITE);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.setCursor(125, 174);
+  if (otaState == OTA_AVAILABLE) {
+    lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+    lcd.println("立即升級");
+  } else if (otaState == OTA_DOWNLOADING) {
+    lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+    lcd.println("下載中...");
+  } else if (otaState == OTA_UPTODATE) {
+    lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    lcd.println("已是最新");
+  } else {
+    lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    lcd.println("暫不可用");
+  }
+
+  // 返回提示
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.setCursor(60, 215);
+  lcd.println("撳其他地方退出");
+}
+
+// =====================================================
+// 退出 OTA page，回到主畫面
+// =====================================================
+void exitOTAPage() {
+  otaState = OTA_IDLE;
+  otaLatestVersion = "";
+  otaBinUrl = "";
+  otaProgress = 0;
+  // 重畫主畫面 (OTA page 之前 fillScreen(TFT_BLACK) 過，唔重畫會空白)
+  currentPage = 0;
+  lastPageSwitch = millis();
+  lastClockUpdate = 0;  // 強制時間立即更新
+  lastMarqueeUpdate = 0;  // 強制 marquee 立即更新
+  displayCurrentPage();
+}
+
+// =====================================================
+// OTA page 嘅 touch handler — 撳「立即升級」trigger performOTA()
+// =====================================================
+void handleOTAPageTouch(int tx, int ty) {
+  // 撳「立即升級」按鈕範圍
+  if (otaState == OTA_AVAILABLE && tx >= 105 && tx <= 215 && ty >= 165 && ty <= 200) {
+    Serial.println("【OTA】撳立即升級");
+    performOTA(otaBinUrl);
+    drawOTAPage();  // 重畫顯示新狀態
+    return;
+  }
+  // 撳其他地方退出
+  Serial.println("【OTA】退出 OTA page");
+  exitOTAPage();
+}
+
+// =====================================================
 // Setup
 // =====================================================
 void setup() {
@@ -1251,6 +1594,43 @@ void setup() {
 // Main loop
 // =====================================================
 void loop() {
+  // ==========================================
+  // OTA page 長按偵測 + touch handler (優先於其他)
+  // ==========================================
+  if (touchIsPressed()) {
+    if (otaTouchDown == 0) {
+      otaTouchDown = millis();
+    }
+    // OTA page 顯示中：唔處理長按 timeout (因為下面 handleOTAPageTouch 已經 return)
+    if (otaState != OTA_IDLE) {
+      int rawX, rawY;
+      if (touchGetPoint(&rawX, &rawY)) {
+        int tx, ty;
+        mapTouchToLCD(rawX, rawY, &tx, &ty);
+        handleOTAPageTouch(tx, ty);
+      }
+      otaTouchDown = 0;  // reset
+    }
+    // 長按 10 秒 → 觸發 OTA page
+    else if (millis() - otaTouchDown >= LONG_PRESS_MS) {
+      Serial.printf("【OTA】長按 10 秒偵測到，入 OTA page\n");
+      otaTouchDown = 0;
+      otaState = OTA_CHECKING;
+      drawOTAPage();              // 先畫「檢查中...」避免空屏 10s
+      checkLatestRelease();        // 同步等 check 完，再畫結果
+      drawOTAPage();               // 重畫最新狀態
+      // 唔 return — 繼續 loop 等 user 撳掣或退出
+    }
+  } else {
+    otaTouchDown = 0;
+  }
+
+  // OTA page 進行中 → 唔做其他嘢 (例如唔好干擾下載)
+  if (otaState == OTA_DOWNLOADING || otaState == OTA_SUCCESS) {
+    delay(100);
+    return;
+  }
+
   // GPIO 0 按鈕處理:
   //   短撳 (< 1 秒): 入設定模式 (WiFiManager)
   //   長撳 (>= 2 秒): reset WiFi 設定 + reboot
@@ -1269,6 +1649,12 @@ void loop() {
   }
 
   if (stopCount == 0) {
+    return;
+  }
+
+  // ✅ OTA page 顯示中 (但非 download 中) → 唔好 overwrite OTA page
+  if (otaState != OTA_IDLE && otaState != OTA_DOWNLOADING && otaState != OTA_SUCCESS) {
+    delay(50);
     return;
   }
 
