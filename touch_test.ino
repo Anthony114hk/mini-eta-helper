@@ -274,8 +274,15 @@ void loop() {
         Serial.printf("【Tap】Zone %X raw=(%d,%d) taps=%u total=%lu\n",
                       zone, x, y, zones[zone].taps, totalTaps);
       } else if (zone == RESET_ZONE) {
-        // Handled in next task; ignore for now
+        // Reset all 16 zones
+        for (int i = 0; i < NUM_ZONES; i++) {
+          zones[i].taps = 0;
+        }
+        totalTaps = 0;
+        lastZone = -1;
         lastTapMs = millis();
+        drawGrid();
+        Serial.println("【RESET】All counters cleared");
       } else {
         Serial.printf("【Tap】outside grid raw=(%d,%d)\n", x, y);
         lastTapMs = millis();
