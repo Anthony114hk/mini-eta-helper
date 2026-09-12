@@ -1,0 +1,25 @@
+# Arduino IDE build artifacts
+build/
+*.bin
+*.elf
+*.hex
+
+# Backup files
+*_bak.ino
+*_bak_*.ino
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets (if any get added later)
+secrets.h
+config_private.h

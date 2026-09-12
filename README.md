@@ -1,0 +1,70 @@
+# 🚌 ESP32 KMB Bus ETA Display
+
+![Hardware: ESP32 CYD (240×320 ST7789 + XPT2046 touch)](https://img.shields.io/badge/hardware-ESP32_CYD-blue)
+![Framework: Arduino + LovyanGFX](https://img.shields.io/badge/framework-Arduino%20%2B%20LovyanGFX-green)
+![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
+
+Hong Kong KMB bus real-time arrival display for the **ESP32 CYD** (Cheap Yellow Display) — 240×320 ST7789 LCD with resistive touch. Also shows weather (HKO Open Data), warnings, and forecast.
+
+## Features
+
+- 🚌 **Real-time KMB ETA** for up to 5 bus stops (Hong Kong)
+- 🌦️ **HKO weather** — temperature, humidity, rainfall, warnings, forecast
+- 📺 **Scrolling marquee** for long weather strings
+- ⚙️ **WiFi + stop config portal** (WiFiManager + WebServer)
+- 🔄 **OTA updates from GitHub Releases** — long-press screen 10s
+
+## Hardware
+
+- ESP32-2432S028R (CYD v1/v2) — 240×320 ST7789 IPS, XPT2046 touch
+- USB-C for power + flashing
+
+## Pin Map
+
+| Function | GPIO |
+|---|---|
+| LCD BL | 27 |
+| LCD CS | 5 |
+| LCD DC | 2 |
+| LCD RST | 4 |
+| Touch CS | 33 |
+| Touch CLK | 26 |
+| Touch DIN | 32 |
+| Touch DO | 39 |
+| Touch IRQ | 36 |
+
+## Build & Flash
+
+1. Install Arduino IDE + ESP32 board support
+2. Install libraries:
+   - `LovyanGFX`
+   - `ArduinoJson` (v7)
+   - `WiFiManager`
+   - `Preferences` (built-in)
+3. Open `kmb-eta-display.ino`, select board "ESP32 Dev Module" (or CYD variant)
+4. Upload
+
+## First Boot
+
+1. On first boot (no WiFi config), device opens `ESP32_Smart_Clock` AP
+2. Connect phone → 192.168.4.1 → enter WiFi + up to 5 KMB stop IDs
+3. Save → device reboots and shows bus ETAs
+
+Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
+
+## OTA Updates
+
+1. Build firmware in Arduino IDE
+2. Export compiled binary: **Sketch → Export Compiled Binary** → produces `.ino.bin`
+3. Rename to `kmb-eta-display.bin`
+4. Create a [GitHub Release](https://github.com/yourname/yourrepo/releases/new):
+   - Tag: `v1.0.0`, `v1.0.1`, ...
+   - Attach `kmb-eta-display.bin`
+   - Publish
+5. On ESP32: **long-press screen for 10 seconds** → OTA page appears
+6. Page shows current vs latest version + an "立即升級" button
+7. Tap button → device downloads, flashes, and reboots
+
+## License
+
+MIT
