@@ -145,6 +145,11 @@ struct ZoneState {
 };
 ZoneState zones[NUM_ZONES];
 
+unsigned long lastTapMs = 0;
+const unsigned long DEBOUNCE_MS = 200;
+int lastZone = -1;
+unsigned long totalTaps = 0;
+
 // =====================================================
 // Map raw X/Y to grid zone index (0..15), or -1 if outside
 // =====================================================
@@ -253,15 +258,30 @@ unsigned long lastHeartbeat = 0;
 
 void loop() {
   if (touchIsPressed()) {
+    if (millis() - lastTapMs < DEBOUNCE_MS) {
+      delay(50);
+      return;
+    }
     int x, y;
     if (touchGetPoint(&x, &y)) {
       int zone = classifyZone(x, y);
-      Serial.printf("【Touch】raw X=%d Y=%d → zone=%d\n", x, y, zone);
-    } else {
-      Serial.printf("【Touch】raw X=%d Y=%d → invalid range\n", x, y);
+      if (zone >= 0 && zone != RESET_ZONE) {
+        zones[zone].taps++;
+        totalTaps++;
+        lastZone = zone;
+        lastTapMs = millis();
+        drawZone(zone, true);
+        Serial.printf("【Tap】Zone %X raw=(%d,%d) taps=%u total=%lu\n",
+                      zone, x, y, zones[zone].taps, totalTaps);
+      } else if (zone == RESET_ZONE) {
+        // Handled in next task; ignore for now
+        lastTapMs = millis();
+      } else {
+        Serial.printf("【Tap】outside grid raw=(%d,%d)\n", x, y);
+        lastTapMs = millis();
+      }
     }
-    // Hold off re-reads while finger is down (debounce)
-    delay(300);
+    delay(50);
   }
   if (millis() - lastHeartbeat >= 1000) {
     lastHeartbeat = millis();
