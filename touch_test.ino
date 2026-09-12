@@ -149,6 +149,8 @@ unsigned long lastTapMs = 0;
 const unsigned long DEBOUNCE_MS = 200;
 int lastZone = -1;
 unsigned long totalTaps = 0;
+unsigned long noResponseMs = 0;
+const unsigned long NO_RESPONSE_TIMEOUT = 5000;
 
 // =====================================================
 // Map raw X/Y to grid zone index (0..15), or -1 if outside
@@ -225,15 +227,48 @@ void drawGrid() {
 }
 
 // =====================================================
-// Draw empty footer (placeholder, expanded in Task 7)
+// Draw footer with live stats
 // =====================================================
 void drawFooter() {
   lcd.fillRect(0, GRID_BOTTOM, 320, FOOTER_H, TFT_BLACK);
   lcd.setFont(&fonts::efontTW_16);
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+
   lcd.setCursor(4, GRID_BOTTOM + 4);
-  lcd.print("Total taps: 0");
+  lcd.printf("Total taps: %lu", totalTaps);
+
+  lcd.setCursor(4, GRID_BOTTOM + 24);
+  if (lastZone >= 0) {
+    lcd.printf("Last: Zone %X", lastZone);
+  } else {
+    lcd.print("Last: -");
+  }
+
+  uint16_t z1 = touchReadRaw(XPT2046_CMD_Z1);
+  lcd.setCursor(4, GRID_BOTTOM + 44);
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.printf("Z1: %u", z1);
+}
+
+// =====================================================
+// Error banner overlay (called when no touch for 5s+)
+// =====================================================
+bool errorBannerShown = false;
+void drawErrorBanner(bool show) {
+  if (show == errorBannerShown) return;  // no-op if state unchanged
+  errorBannerShown = show;
+  int y = GRID_BOTTOM + 24;
+  if (show) {
+    lcd.fillRect(160, y, 156, 18, TFT_BLACK);
+    lcd.setFont(&fonts::efontTW_16);
+    lcd.setTextSize(1);
+    lcd.setTextColor(TFT_RED, TFT_BLACK);
+    lcd.setCursor(164, y + 2);
+    lcd.print("TOUCH NOT RESPONDING");
+  } else {
+    lcd.fillRect(160, y, 156, 18, TFT_BLACK);
+  }
 }
 
 void setup() {
@@ -257,7 +292,12 @@ void setup() {
 unsigned long lastHeartbeat = 0;
 
 void loop() {
-  if (touchIsPressed()) {
+  bool pressed = touchIsPressed();
+
+  if (pressed) {
+    noResponseMs = 0;
+    drawErrorBanner(false);
+
     if (millis() - lastTapMs < DEBOUNCE_MS) {
       delay(50);
       return;
@@ -274,10 +314,7 @@ void loop() {
         Serial.printf("【Tap】Zone %X raw=(%d,%d) taps=%u total=%lu\n",
                       zone, x, y, zones[zone].taps, totalTaps);
       } else if (zone == RESET_ZONE) {
-        // Reset all 16 zones
-        for (int i = 0; i < NUM_ZONES; i++) {
-          zones[i].taps = 0;
-        }
+        for (int i = 0; i < NUM_ZONES; i++) zones[i].taps = 0;
         totalTaps = 0;
         lastZone = -1;
         lastTapMs = millis();
@@ -287,12 +324,17 @@ void loop() {
         Serial.printf("【Tap】outside grid raw=(%d,%d)\n", x, y);
         lastTapMs = millis();
       }
+      drawFooter();
     }
     delay(50);
-  }
-  if (millis() - lastHeartbeat >= 1000) {
-    lastHeartbeat = millis();
-    uint16_t z1 = touchReadRaw(XPT2046_CMD_Z1);
-    Serial.printf("【Heartbeat】Z1=%u\n", z1);
+  } else {
+    noResponseMs += 50;
+    if (noResponseMs >= NO_RESPONSE_TIMEOUT) {
+      drawErrorBanner(true);
+      if (noResponseMs % 5000 < 50) {  // log every 5 s
+        Serial.println("❌ No touch detected for 5s+ — chip may be dead");
+      }
+    }
+    delay(50);
   }
 }
