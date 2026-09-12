@@ -12,7 +12,7 @@ Hong Kong KMB bus real-time arrival display for the **ESP32 CYD** (Cheap Yellow 
 - 🌦️ **HKO weather** — temperature, humidity, rainfall, warnings, forecast
 - 📺 **Scrolling marquee** for long weather strings
 - ⚙️ **WiFi + stop config portal** (WiFiManager + WebServer)
-- 🔄 **OTA updates from GitHub Releases** — long-press screen 10s
+- 🔄 **OTA updates from GitHub Releases** — GPIO 0 button long-press 3s (touch chip dead on this CYD)
 
 ## Hardware
 
@@ -61,9 +61,26 @@ Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
    - Tag: `v1.0.0`, `v1.0.1`, ...
    - Attach `kmb-eta-display.bin`
    - Publish
-5. On ESP32: **long-press screen for 10 seconds** → OTA page appears
+5. On ESP32: **hold GPIO 0 button for 3+ seconds** → OTA page appears
 6. Page shows current vs latest version + an "立即升級" button
-7. Tap button → device downloads, flashes, and reboots
+7. Short-press GPIO 0 button to upgrade (or hold 1.5s+ to cancel) → device downloads, flashes, and reboots
+
+## Touch Diagnostic
+
+If the touch chip is suspected faulty (no response to finger taps), flash `touch_test.ino` instead of the main firmware:
+
+1. Open `touch_test.ino` in Arduino IDE
+2. Sketch → Upload
+3. Open Serial Monitor @ 115200 baud
+4. Touch any of the 16 zones (0–F) on the 4×4 grid
+5. Tap the center zone ("5" with red "R" badge) to reset all counters
+
+The test renders a 4×4 grid of zones. Each tap:
+- Flips the zone from black to green
+- Increments a per-zone counter (bottom-right corner)
+- Logs the raw X/Y, Z1 pressure, and zone ID to Serial
+
+If no touch registers within 5 seconds, a red "TOUCH NOT RESPONDING" banner appears and Serial logs the warning every 5 s. This confirms the chip is dead or the pinout is wrong.
 
 ## License
 

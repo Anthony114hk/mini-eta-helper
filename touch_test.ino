@@ -289,8 +289,6 @@ void setup() {
   drawFooter();
 }
 
-unsigned long lastHeartbeat = 0;
-
 void loop() {
   bool pressed = touchIsPressed();
 
