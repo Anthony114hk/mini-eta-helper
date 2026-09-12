@@ -120,13 +120,22 @@ uint16_t touchReadRaw(uint8_t cmd) {
 }
 
 bool touchIsPressed() {
-  // 讀 Z1 (pressure)，有撳嘅時候會 > threshold
-  uint16_t z1 = touchReadRaw(XPT2046_CMD_Z1);
-  // ✅ 只 log 撳到嘅時候 (Z1 > 50)，唔再 spam "Z1=0"
-  if (z1 > 50) {
+  // 讀 Z1 (pressure) 兩次取平均 — 更穩定，避免 noise spike
+  uint16_t z1a = touchReadRaw(XPT2046_CMD_Z1);
+  uint16_t z1b = touchReadRaw(XPT2046_CMD_Z1);
+  uint16_t z1 = (z1a + z1b) / 2;
+
+  // ✅ Throttled debug log — 每 500ms 先 log 一次 (避免 spam)
+  static uint16_t lastLoggedZ1 = 0;
+  static unsigned long lastLogTime = 0;
+  unsigned long now = millis();
+  if (z1 > 30 && (now - lastLogTime > 500 || (z1 > 30 && lastLoggedZ1 <= 30))) {
     Serial.printf("【Touch】Z1=%d (撳到！)\n", z1);
+    lastLoggedZ1 = z1;
+    lastLogTime = now;
   }
-  return z1 > 50;  // 降低 threshold (100 太嚴，有啲 panel 撳落去都未必過)
+
+  return z1 > 30;  // 降低 threshold (50 → 30，更敏感)
 }
 
 bool touchGetPoint(int* x, int* y) {
@@ -1600,7 +1609,19 @@ void loop() {
   if (touchIsPressed()) {
     if (otaTouchDown == 0) {
       otaTouchDown = millis();
+      Serial.println("【OTA】撳到喇，繼續長按 10 秒觸發 OTA");
     }
+
+    // ✅ Long-press 進度 log (3s / 6s / 9s) — 等 user 知道有反應
+    unsigned long held = millis() - otaTouchDown;
+    static unsigned long lastProgressLog = 0;
+    if (otaState == OTA_IDLE && held > 0 && held < LONG_PRESS_MS &&
+        millis() - lastProgressLog > 1500) {
+      int secLeft = (LONG_PRESS_MS - held) / 1000 + 1;
+      Serial.printf("【OTA】長按中... 仲要多 %d 秒觸發 OTA\n", secLeft);
+      lastProgressLog = millis();
+    }
+
     // OTA page 顯示中：唔處理長按 timeout (因為下面 handleOTAPageTouch 已經 return)
     if (otaState != OTA_IDLE) {
       int rawX, rawY;
@@ -1612,8 +1633,8 @@ void loop() {
       otaTouchDown = 0;  // reset
     }
     // 長按 10 秒 → 觸發 OTA page
-    else if (millis() - otaTouchDown >= LONG_PRESS_MS) {
-      Serial.printf("【OTA】長按 10 秒偵測到，入 OTA page\n");
+    else if (held >= LONG_PRESS_MS) {
+      Serial.printf("【OTA】✓ 長按 10 秒偵測到，入 OTA page\n");
       otaTouchDown = 0;
       otaState = OTA_CHECKING;
       drawOTAPage();              // 先畫「檢查中...」避免空屏 10s
