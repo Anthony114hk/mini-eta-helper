@@ -68,6 +68,86 @@ LGFX_CYD lcd;
 #define T_MISO 39
 #define T_CS 33
 
+// ⚠️ 如果上面嗰組 pin 唔 work，scan 下面 3 組常見 CYD variant
+//    開頭 `//` 嗰組就用，最尾冇 `//` 嗰組就用
+// Variant A: Sunton CYD v1 (預設): CLK=26 MOSI=32 MISO=39 CS=33
+// Variant B: 另一款:                CLK=25 MOSI=33 MISO=39 CS=26
+// Variant C: Elecrow:               CLK=25 MOSI=33 MISO=36 CS=26
+
+// Pin-scan diagnostic — 用 GPIO 0 撳落去觸發
+struct PinVariant {
+  const char* name;
+  int clk, mosi, miso, cs;
+};
+
+const PinVariant PIN_VARIANTS[] = {
+  {"A: CLK=26 MOSI=32 MISO=39 CS=33", 26, 32, 39, 33},
+  {"B: CLK=25 MOSI=33 MISO=39 CS=26", 25, 33, 39, 26},
+  {"C: CLK=25 MOSI=33 MISO=36 CS=26", 25, 33, 36, 26},
+  {"D: CLK=14 MOSI=13 MISO=12 CS=15", 14, 13, 12, 15},
+};
+
+uint16_t scanReadZ1(int clk, int mosi, int miso, int cs) {
+  pinMode(clk, OUTPUT);
+  pinMode(mosi, OUTPUT);
+  pinMode(miso, INPUT);
+  pinMode(cs, OUTPUT);
+  digitalWrite(cs, HIGH);
+  digitalWrite(clk, LOW);
+  digitalWrite(mosi, LOW);
+
+  // Send Z1 command 0xB0
+  digitalWrite(cs, LOW);
+  uint8_t cmd = 0xB0;
+  for (int i = 7; i >= 0; i--) {
+    digitalWrite(mosi, (cmd >> i) & 1);
+    digitalWrite(clk, HIGH);
+    delayMicroseconds(2);
+    digitalWrite(clk, LOW);
+    delayMicroseconds(2);
+  }
+  uint16_t result = 0;
+  for (int i = 11; i >= 0; i--) {
+    digitalWrite(clk, HIGH);
+    delayMicroseconds(2);
+    if (digitalRead(miso)) result |= (1 << i);
+    digitalWrite(clk, LOW);
+    delayMicroseconds(2);
+  }
+  digitalWrite(clk, HIGH);
+  delayMicroseconds(2);
+  digitalWrite(clk, LOW);
+  digitalWrite(cs, HIGH);
+  return result;
+}
+
+void runTouchPinScan() {
+  Serial.println("\n========================================");
+  Serial.println("【Scan】Touch pin scan 開始 — 撳住畫面任何位置");
+  Serial.println("========================================");
+  delay(500);
+
+  for (int v = 0; v < 4; v++) {
+    auto& p = PIN_VARIANTS[v];
+    Serial.printf("\n【Scan】Variant %s\n", p.name);
+
+    uint16_t base = scanReadZ1(p.clk, p.mosi, p.miso, p.cs);
+    delay(50);
+    uint16_t touch = scanReadZ1(p.clk, p.mosi, p.miso, p.cs);
+    delay(50);
+    uint16_t release = scanReadZ1(p.clk, p.mosi, p.miso, p.cs);
+
+    Serial.printf("  base=%d  touch=%d  release=%d  delta=%d\n",
+                  base, touch, release, abs((int)touch - (int)release));
+    delay(100);
+  }
+
+  Serial.println("\n========================================");
+  Serial.println("【Scan】完成！邊個 variant 嘅 base/release 唔同 = 嗰組 pin work");
+  Serial.println("⚠️ 撳住畫面期間呢段先有意義 — release 同 base 應該差 0");
+  Serial.println("========================================\n");
+}
+
 // XPT2046 command bytes
 #define XPT2046_CMD_X  0x90  // 12-bit differential X position
 #define XPT2046_CMD_Y  0xD0  // 12-bit differential Y position
@@ -125,13 +205,11 @@ bool touchIsPressed() {
   uint16_t z1b = touchReadRaw(XPT2046_CMD_Z1);
   uint16_t z1 = (z1a + z1b) / 2;
 
-  // ✅ Throttled debug log — 每 500ms 先 log 一次 (避免 spam)
-  static uint16_t lastLoggedZ1 = 0;
+  // ✅ Debug log — 每 1 秒 log Z1 一次 (不論有冇撳) — debug 用
   static unsigned long lastLogTime = 0;
   unsigned long now = millis();
-  if (z1 > 30 && (now - lastLogTime > 500 || (z1 > 30 && lastLoggedZ1 <= 30))) {
-    Serial.printf("【Touch】Z1=%d (撳到！)\n", z1);
-    lastLoggedZ1 = z1;
+  if (now - lastLogTime > 1000) {
+    Serial.printf("【Touch】Z1=%d (Z1a=%d, Z1b=%d)\n", z1, z1a, z1b);
     lastLogTime = now;
   }
 
@@ -1653,12 +1731,17 @@ void loop() {
   }
 
   // GPIO 0 按鈕處理:
-  //   短撳 (< 1 秒): 入設定模式 (WiFiManager)
-  //   長撳 (>= 2 秒): reset WiFi 設定 + reboot
+  //   短撳 (< 2 秒): 入設定模式 (WiFiManager)
+  //   長撳 2-3 秒: reset WiFi 設定 + reboot
+  //   長撳 3+ 秒: 跑 touch pin scan (debug 用)
   if (digitalRead(0) == LOW) {
     int count = 0;
-    while (digitalRead(0) == LOW && count < 20) { delay(100); count++; }
-    if (count >= 20) {
+    while (digitalRead(0) == LOW && count < 50) { delay(100); count++; }
+    if (count >= 30) {
+      Serial.println("【Scan】GPIO 0 長撳 3 秒，run touch pin scan");
+      runTouchPinScan();
+      delay(2000);
+    } else if (count >= 20) {
       Serial.println("【Reset】GPIO 0 長撳 2 秒，reset WiFi + reboot");
       WiFiManager wm;
       wm.resetSettings();
