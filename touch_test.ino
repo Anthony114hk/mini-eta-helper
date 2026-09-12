@@ -330,7 +330,8 @@ void loop() {
     if (noResponseMs >= NO_RESPONSE_TIMEOUT) {
       drawErrorBanner(true);
       if (noResponseMs % 5000 < 50) {  // log every 5 s
-        Serial.println("❌ No touch detected for 5s+ — chip may be dead");
+        uint16_t z1Now = touchReadRaw(XPT2046_CMD_Z1);
+        Serial.printf("❌ No touch detected for 5s+ — Z1=%u (chip may be dead or pins wrong)\n", z1Now);
       }
     }
     delay(50);
