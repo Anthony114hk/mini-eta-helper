@@ -68,6 +68,9 @@ Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
 
 ### Changelog
 
+**v1.0.5** — Remove touch debug log
+- `touchIsPressed()` 每秒 print `【Touch】Z1=0 (a=0 b=0 c=0)` 嘅 debug log 已移除 (之前診斷 touch chip 時加)
+
 **v1.0.4** — Fix read-after-redirect EOF (v1.0.3 redirect worked but stream immediately EOF)
 - v1.0.3 manually followed GitHub 302 → 200 successfully, but `stream->readBytes()` returned 0 immediately (read 0/1860112 bytes)
 - Root cause: reusing WiFiClientSecure across redirects polluted SSL state — server may have closed the connection after sending headers

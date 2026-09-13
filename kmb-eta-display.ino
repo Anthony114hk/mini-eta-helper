@@ -402,15 +402,6 @@ bool touchIsPressed() {
   delay(1);
   uint16_t z1c = touchReadRaw(XPT2046_CMD_Z1);
   uint16_t z1 = max(max(z1a, z1b), z1c);
-
-  // Debug log — 每 1 秒
-  static unsigned long lastLogTime = 0;
-  unsigned long now = millis();
-  if (now - lastLogTime > 1000) {
-    Serial.printf("【Touch】Z1=%d (a=%d b=%d c=%d)\n", z1, z1a, z1b, z1c);
-    lastLogTime = now;
-  }
-
   return z1 > 30;
 }
 
@@ -454,7 +445,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.4"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.5"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
