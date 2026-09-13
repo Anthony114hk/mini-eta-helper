@@ -17,6 +17,10 @@ SPIClass touchSPI(HSPI);
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 
+// ✅ 沒有額外 font file — 用 efontTW_16 (4500+ 繁體) 加自製「埗」bitmap overlay
+// 因為 gb2312a font 太大 (163KB) 會爆 firmware (1.875MB limit)
+// 所以我哋只畫「埗」一個字嘅 bitmap (32 bytes)，其他字用 efontTW_16
+
 // ✅ Forward declarations — Arduino IDE 會喺 .ino file 頂部自動插入所有 function prototype
 // 但 IDE 唔識 struct 嘅 forward dependency。如果 prototype (例如 drawBusLine(BusGroup&))
 // 喺 struct BusGroup 定義之前出現就會 fail。所以要喺度先 declare 一次。
@@ -62,6 +66,105 @@ public:
 };
 
 LGFX_CYD lcd;
+
+// =====================================================
+// ✅ 自製「埗」character bitmap (16x16, 1-bit MSB-first)
+// 因為 efontTW_16 唔包「埗」(HK 罕見字 U+57D7)，用 LovyanGFX drawBitmap overlay
+// 結構：上面「土」(rows 1-6)，下面「步」(rows 8-15)
+// =====================================================
+//
+//  16x16 埗 嘅 visual design (1 = pixel on, 0 = pixel off):
+//
+//     0 1 2 3 4 5 6 7 8 9 A B C D E F
+//   0 . . . . . . . . . . . . . . . .
+//   1 . . X X X X X X X X X X X . . .   ← 土 top horizontal
+//   2 . . . . . . . . . . . . . . . .
+//   3 . . . . . . . X X . . . . . . .   ← 土 vertical
+//   4 . . . . . . . X X . . . . . . .   ← 土 vertical
+//   5 . . X X X X X X X X X X X . . .   ← 土 bottom horizontal
+//   6 . . . . . . . . . . . . . . . .
+//   7 . . . X X X X X X . . . . . . .   ← 止 top
+//   8 . . . X . . . X . . . . . . . .   ← 止 left + right
+//   9 . . . X . . . X . . . . . . . .   ← 止 verticals
+//   A . . . X X X X X . . . . . . . .   ← 止 bottom
+//   B . . . X . . . . X X X X X . . .   ← 少 top horizontal
+//   C . . . X . . . . X . . . . . . .   ← 少 vertical
+//   D . . . X . . . . X . . . . . . .
+//   E . . . X . . . . X . . . . . . .
+//   F . . . X . . . . X . . . . . . .   ← 底 (vertical strokes continue down)
+//
+static const uint8_t charBu16x16[32] = {
+  0x00, 0x00,  // row 0
+  0xFF, 0xC0,  // row 1: 土 top
+  0x00, 0x00,  // row 2
+  0x06, 0x00,  // row 3: 土 vertical
+  0x06, 0x00,  // row 4: 土 vertical
+  0xFF, 0xC0,  // row 5: 土 bottom horizontal
+  0x00, 0x00,  // row 6
+  0x3E, 0x00,  // row 7: 止 top horizontal (x=1-5)
+  0x22, 0x00,  // row 8: 止 verticals
+  0x22, 0x00,  // row 9: 止 verticals
+  0x3E, 0x00,  // row A: 止 bottom horizontal
+  0x23, 0xE0,  // row B: 少 top horizontal
+  0x22, 0x00,  // row C: 少 vertical
+  0x22, 0x00,  // row D
+  0x22, 0x00,  // row E
+  0x22, 0x00,  // row F
+};
+
+// ✅ Draw 埗 bitmap at (x, y) with given color
+// 因為 chinese3 font 唔包呢個字，我哋用 efontTW_16 畫 "深水" + bitmap overlay "埗" + " ETA"
+void drawCharBu(int x, int y, uint16_t color) {
+  // drawBitmap signature: (x, y, bitmap_data, w, h, color)
+  lcd.drawBitmap(x, y, (uint8_t*)charBu16x16, 16, 16, color);
+}
+
+// ✅ Draw a string with 埗 (U+57D7) bitmap substitution
+// 處理 s "深水埗" → 畫 "深水" (efontTW_16) + 埗 bitmap + 後續 (efontTW_16)
+// 用 lcd.textWidth() 量度準確寬度（用嚟做 marquee）
+// ⚠️ 用 lcd.drawString() 而唔係 lcd.print() → 避免 text wrap 去下一行 (解決 13M 兩份 copy 重疊 bug)
+int drawStringWithBu(const char* s, int x, int y, uint16_t color) {
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+  lcd.setTextColor(color, TFT_BLACK);
+
+  int curX = x;
+  const char* p = s;
+  const char* BU_UTF8 = "\xe5\x9d\x97";  // 埗 UTF-8 (3 bytes)
+  size_t buLen = 3;
+
+  while (*p) {
+    // Check if current position starts with 埗
+    if (strncmp(p, BU_UTF8, buLen) == 0) {
+      // 埗 found → draw bitmap
+      drawCharBu(curX, y, color);
+      curX += 16;  // bitmap width
+      p += buLen;
+    } else {
+      // Find next 埗 (or end of string)
+      const char* nextBu = strstr(p, BU_UTF8);
+      size_t chunkLen = nextBu ? (size_t)(nextBu - p) : strlen(p);
+
+      if (chunkLen > 0) {
+        // Use a temp buffer for the chunk
+        char buf[256];
+        if (chunkLen >= sizeof(buf)) chunkLen = sizeof(buf) - 1;
+        memcpy(buf, p, chunkLen);
+        buf[chunkLen] = '\0';
+
+        // ✅ 用 drawString() 而唔係 print() → 唔會 wrap 去下一行
+        lcd.drawString(buf, curX, y);
+        curX += lcd.textWidth(buf);
+      }
+      p += chunkLen;
+    }
+  }
+  return curX - x;
+}
+
+int drawStringWithBu(const String& s, int x, int y, uint16_t color) {
+  return drawStringWithBu(s.c_str(), x, y, color);
+}
 
 // =====================================================
 // XPT2046 Touch Driver — software bit-bang SPI
@@ -351,7 +454,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.0"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.1"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -643,7 +746,9 @@ void saveConfigCallback() {
 }
 
 String fixHongKongWords(String input) {
-  input.replace("邨", "村");
+  // ⚠️ 用戶明確表示唔可以隨便更改字 (唔可以將「埗」改「步」)
+  // 所以淨係處理一啲肯定要換嘅字 (例如政府官方用「的」但我哋想用「的」之類)
+  // 而家冇任何替換 — 全部用原字
   return input;
 }
 
@@ -990,6 +1095,7 @@ void fetchWeather() {
 // 渲染單行 (支持跑馬燈)
 // =====================================================
 void drawBusLine(BusGroup& group, int yPos, bool clearFirst) {
+  // ✅ efontTW_16 畫大部份繁體中文字 + 埗 bitmap overlay
   lcd.setFont(&fonts::efontTW_16);
   lcd.setTextSize(1);
   lcd.setClipRect(10, yPos, maxDisplayWidth, 25);
@@ -1013,15 +1119,16 @@ void drawBusLine(BusGroup& group, int yPos, bool clearFirst) {
       }
     }
 
-    lcd.drawString(group.fullText, x1, yPos);
+    // ✅ 用 drawStringWithBu 處理「埗」bitmap overlay (deep water 埗, efontTW 缺)
+    drawStringWithBu(group.fullText, x1, yPos, TFT_WHITE);
     if (x2 < 10 + maxDisplayWidth) {
-      lcd.drawString(group.fullText, x2, yPos);
+      drawStringWithBu(group.fullText, x2, yPos, TFT_WHITE);
     }
   } else {
     if (clearFirst) {
       lcd.fillRect(10, yPos, maxDisplayWidth, 25, TFT_BLACK);
     }
-    lcd.drawString(group.fullText, 10, yPos);
+    drawStringWithBu(group.fullText, 10, yPos, TFT_WHITE);
   }
 
   lcd.clearClipRect();
@@ -1055,13 +1162,13 @@ void displayCurrentPage() {
   lcd.drawFastHLine(0, 19, 320, TFT_DARKGREY);
 
   // Header (y=22 至 y=40)
+  // ✅ efontTW_16 + drawStringWithBu 處理 stopName 內嘅「埗」(bitmap overlay)
   lcd.setFont(&fonts::efontTW_16);
-
-  lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
-  lcd.setCursor(10, 24);
   if (stops[stopIdx].stopName != "") {
-    lcd.print(stops[stopIdx].stopName + " ETA");
+    drawStringWithBu(stops[stopIdx].stopName + " ETA", 10, 24, TFT_YELLOW);
   } else {
+    lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+    lcd.setCursor(10, 24);
     lcd.print("Stop " + String(stopIdx + 1) + " ETA");
   }
 
@@ -1268,6 +1375,34 @@ void enterConfigMode(bool blocking) {
 
   // === 第一階段: WiFi 連線 (blocking = false 嘅 setup 流程) ===
   if (!blocking) {
+    // ✅ AP mode 畫面 — WiFiManager 啟動 AP 後會阻塞等 user 設 WiFi，期間要顯示指示
+    //    全部 size 1 確保 fit 320px 闊 (esp. "ESP32_Smart_Clock" 16 chars × size 2 會 overflow)
+    lcd.fillScreen(TFT_BLACK);
+    lcd.setFont(&fonts::efontTW_16);
+    lcd.setTextSize(1);
+
+    lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+    lcd.setCursor(10, 30);
+    lcd.println("WiFi 未連線");
+
+    lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+    lcd.setCursor(10, 70);
+    lcd.println("用手機連 WiFi:");
+    lcd.setCursor(10, 100);
+    lcd.println("SSID:");
+
+    lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+    lcd.setCursor(10, 130);
+    lcd.println("ESP32_Smart_Clock");
+
+    lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+    lcd.setCursor(10, 170);
+    lcd.println("→ 連上後開瀏覽器");
+    lcd.setCursor(10, 195);
+    lcd.println("  http://192.168.4.1");
+    lcd.setCursor(10, 220);
+    lcd.println("  輸入 WiFi 密碼 → Save");
+
     WiFiManager wm;
     wm.setSaveConfigCallback(saveConfigCallback);
     wm.setConnectTimeout(15);
@@ -1302,7 +1437,7 @@ void enterConfigMode(bool blocking) {
     lcd.println("用手機/電腦開瀏覽器:");
 
     lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-    lcd.setTextSize(2);
+    lcd.setTextSize(1);
     lcd.setCursor(10, 130);
     lcd.printf("http://%s/", ip.toString().c_str());
 
@@ -1447,33 +1582,51 @@ void checkLatestRelease() {
   otaLatestVersion = "";
   otaBinUrl = "";
 
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
   String url = "https://api.github.com/repos/" GITHUB_USER "/" GITHUB_REPO "/releases/latest";
-  http.setTimeout(10000);
-  http.addHeader("User-Agent", "ESP32-OTA-Checker");
-  http.addHeader("Accept", "application/vnd.github+json");
-
   Serial.printf("【OTA】GET %s\n", url.c_str());
-  if (!http.begin(client, url)) {
-    otaState = OTA_FAILED;
-    Serial.println("【OTA】http.begin() 失敗");
-    return;
-  }
 
-  int code = http.GET();
-  Serial.printf("【OTA】HTTP code: %d\n", code);
-  if (code != HTTP_CODE_OK) {
-    otaState = OTA_FAILED;
+  String body = "";
+  int code = -1;
+
+  // ✅ Retry 3 次 — TLS handshake / DNS 偶爾失敗常見
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      Serial.printf("【OTA】retry #%d ...\n", attempt);
+      delay(1500);
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(15000);
+
+    HTTPClient http;
+    http.setTimeout(15000);  // 15s — TLS handshake 第一次可能慢
+    http.addHeader("User-Agent", "ESP32-OTA-Checker");
+    http.addHeader("Accept", "application/vnd.github+json");
+
+    if (!http.begin(client, url)) {
+      Serial.println("【OTA】http.begin() 失敗");
+      continue;
+    }
+    code = http.GET();
+    Serial.printf("【OTA】HTTP code: %d\n", code);
+
+    if (code != HTTP_CODE_OK) {
+      http.end();
+      continue;
+    }
+
+    body = http.getString();
     http.end();
-    return;
+    Serial.printf("【OTA】Got %d bytes\n", body.length());
+
+    if (body.length() > 0) break;  // 成功拿到 body，唔再 retry
   }
 
-  String body = http.getString();
-  http.end();
-  Serial.printf("【OTA】Got %d bytes\n", body.length());
+  if (code != HTTP_CODE_OK || body.length() == 0) {
+    otaState = OTA_FAILED;
+    return;
+  }
 
   DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, body);
@@ -1762,6 +1915,37 @@ void handleOTAPageButton() {
 }
 
 // =====================================================
+// OTA page 嘅 touch handler
+//   撳任何位置 → 升級 (如有更新) / 退出 (否則)
+//   (因為 OTA page 已經係 modal 狀態，single tap 處理最簡單直接，
+//    避免 touch 座標 calibration 偏差撳唔到掣嘅問題)
+// =====================================================
+void handleOTAPageTouch() {
+  static bool wasPressed = false;
+  static unsigned long lastTapMs = 0;
+  const unsigned long TAP_DEBOUNCE = 300;
+
+  bool pressed = touchIsPressed();
+  if (pressed && !wasPressed) {
+    wasPressed = true;
+  } else if (!pressed && wasPressed) {
+    wasPressed = false;
+    if (millis() - lastTapMs > TAP_DEBOUNCE) {
+      lastTapMs = millis();
+      // 只要確認有 touch event 就 trigger (唔理位置，避免 calibration 問題)
+      if (otaState == OTA_AVAILABLE) {
+        Serial.println("【OTA】Touch 觸發升級");
+        performOTA(otaBinUrl);
+        drawOTAPage();
+      } else {
+        Serial.println("【OTA】Touch 退出 OTA page");
+        exitOTAPage();
+      }
+    }
+  }
+}
+
+// =====================================================
 // GPIO 0 button state machine (主畫面時用)
 //   單撳 (< 2s, 3 秒內冇 follow-up)  → toggleFlipClock()
 //   雙撳 (3 秒內撳 2 下)             → enterConfigMode(true)
@@ -1835,6 +2019,32 @@ void pollGPIO0Button() {
         btnState = BTN_IDLE;
       }
       break;
+    }
+  }
+}
+
+// =====================================================
+// Touch tap detection (anywhere on screen)
+//   撳一下 → toggle flip clock (bus data ↔ clock)
+//   用 press/release 邊沿偵測，debounce 300ms
+// =====================================================
+void checkTouchTap() {
+  static bool wasPressed = false;
+  static unsigned long lastTapMs = 0;
+  const unsigned long TAP_DEBOUNCE = 300;
+
+  bool pressed = touchIsPressed();
+
+  if (pressed && !wasPressed) {
+    // Press down edge
+    wasPressed = true;
+  } else if (!pressed && wasPressed) {
+    // Release edge — register tap
+    wasPressed = false;
+    if (millis() - lastTapMs > TAP_DEBOUNCE) {
+      lastTapMs = millis();
+      Serial.println("【Touch】撳一下，toggle flip clock");
+      toggleFlipClock();
     }
   }
 }
@@ -2039,6 +2249,7 @@ void loop() {
       return;
     }
     handleOTAPageButton();  // 等 GPIO 0 button 短/長撳
+    handleOTAPageTouch();   // 等 touch tap (撳升級掣 / 退出)
     delay(50);
     return;
   }
@@ -2051,6 +2262,12 @@ void loop() {
   //   長撳 3+秒 → OTA check
   // ==========================================
   pollGPIO0Button();
+
+  // ==========================================
+  // Touch tap (anywhere on screen) → toggle flip clock
+  // Works in both bus data and clock mode (called before early return)
+  // ==========================================
+  checkTouchTap();
 
   // ==========================================
   // Flip clock mode → 1Hz 更新時間，跳過 bus/weather loop
@@ -2136,6 +2353,7 @@ void loop() {
 
   // 時間更新 (每 10 秒)
   if (currentMillis - lastClockUpdate >= 10000) {
+    lcd.fillRect(190, 22, 130, 18, TFT_BLACK);  // 清除舊時間殘影
     lcd.setFont(&fonts::efontTW_16);
     lcd.setTextColor(TFT_GREEN, TFT_BLACK);
     lcd.setCursor(195, 24);

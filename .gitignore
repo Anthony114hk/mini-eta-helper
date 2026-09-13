@@ -9,6 +9,9 @@ build/
 *_bak_*.ino
 *.bak
 
+# Experimental / unused font files (was tried but superseded by efontTW_16 + custom 埗 bitmap)
+u8g2_gb2312a_font.h
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -23,3 +26,6 @@ desktop.ini
 # Secrets (if any get added later)
 secrets.h
 config_private.h
+
+# Development process docs (superpowers plans/specs - internal dev artifacts)
+docs/

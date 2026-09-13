@@ -11,8 +11,9 @@ Hong Kong KMB bus real-time arrival display for the **ESP32 CYD** (Cheap Yellow 
 - 🚌 **Real-time KMB ETA** for up to 5 bus stops (Hong Kong)
 - 🌦️ **HKO weather** — temperature, humidity, rainfall, warnings, forecast
 - 📺 **Scrolling marquee** for long weather strings
-- ⚙️ **WiFi + stop config portal** (WiFiManager + WebServer)
-- 🔄 **OTA updates from GitHub Releases** — GPIO 0 button long-press 3s (touch chip dead on this CYD)
+- ⏰ **Flip clock mode** — tap screen (or GPIO 0 short-press) to toggle between bus data and 7-segment LED clock
+- ⚙️ **WiFi + stop config portal** (WiFiManager + WebServer) — GPIO 0 double-tap
+- 🔄 **OTA updates from GitHub Releases** — GPIO 0 button long-press 3s
 
 ## Hardware
 
@@ -57,13 +58,23 @@ Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
 1. Build firmware in Arduino IDE
 2. Export compiled binary: **Sketch → Export Compiled Binary** → produces `.ino.bin`
 3. Rename to `kmb-eta-display.bin`
-4. Create a [GitHub Release](https://github.com/yourname/yourrepo/releases/new):
+4. Create a [GitHub Release](https://github.com/Anthony114hk/mini-eta-helper/releases/new):
    - Tag: `v1.0.0`, `v1.0.1`, ...
    - Attach `kmb-eta-display.bin`
    - Publish
-5. On ESP32: **hold GPIO 0 button for 3+ seconds** → OTA page appears
+5. On ESP32: **hold GPIO 0 button for 10+ seconds** → OTA page appears
 6. Page shows current vs latest version + an "立即升級" button
 7. Short-press GPIO 0 button to upgrade (or hold 1.5s+ to cancel) → device downloads, flashes, and reboots
+
+### Changelog
+
+**v1.0.1** — `埗` bitmap fix + 13M marquee overlap fix
+- Custom 16×16 `埗` (U+57D7) bitmap rendered via `lcd.drawBitmap` overlay for stop names containing 深水埗 (since `efontTW_16` lacks this character)
+- Switch `lcd.print` → `lcd.drawString` in `drawStringWithBu()` — eliminates text-wrap that caused 13M marquee to visually overlap two text copies
+- `u8g2_gb2312a_font.h` (Simplified Chinese font) removed to fit firmware in 1.875 MB partition
+- Touch chip now working (CLK=25 fix); flip-clock mode + GPIO 0 button navigation enabled
+
+**v1.0.0** — initial release
 
 ## Touch Diagnostic
 
