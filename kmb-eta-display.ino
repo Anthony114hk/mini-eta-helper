@@ -8,6 +8,11 @@
 #include <time.h>
 #include <WebServer.h>
 #include <Update.h>
+#include <Wire.h>
+#include <SPI.h>
+
+// ✅ Touch SPI — Hardware SPI (HSPI) 取代 bit-bang，更穩定
+SPIClass touchSPI(HSPI);
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
@@ -63,7 +68,7 @@ LGFX_CYD lcd;
 // 完全唔靠 LovyanGFX touch API，避開 SPI bus 衝突 + 版本兼容問題
 // CYD pins: T_CLK=26, T_MOSI=32, T_MISO=39, T_CS=33
 // =====================================================
-#define T_CLK 26
+#define T_CLK 25   // ✅ Corrected per board silkscreen: TP CLK = IO25 (was IO26, caused no-response)
 #define T_MOSI 32
 #define T_MISO 39
 #define T_CS 33
@@ -83,40 +88,62 @@ struct PinVariant {
 const PinVariant PIN_VARIANTS[] = {
   {"A: CLK=26 MOSI=32 MISO=39 CS=33", 26, 32, 39, 33},
   {"B: CLK=25 MOSI=33 MISO=39 CS=26", 25, 33, 39, 26},
-  {"C: CLK=25 MOSI=33 MISO=36 CS=26", 25, 33, 36, 26},
+  {"C: CLK=25 MOSI=33 MISO=36 CS=26", 25, 33, 36, 26},  // GPIO 36 似 PENIRQ (stable HIGH)
   {"D: CLK=14 MOSI=13 MISO=12 CS=15", 14, 13, 12, 15},
+  {"E: CLK=26 MOSI=32 MISO=34 CS=33", 26, 32, 34, 33},  // 試 MISO=34
+  {"F: CLK=26 MOSI=32 MISO=35 CS=33", 26, 32, 35, 33},  // 試 MISO=35
+  {"G: CLK=25 MOSI=32 MISO=39 CS=33", 25, 32, 39, 33},  // MOSI=32 + CLK=25 mix
+  {"H: CLK=27 MOSI=32 MISO=39 CS=33", 27, 32, 39, 33},  // CLK=27 (CYDv2 嘅 CLK)
 };
 
-uint16_t scanReadZ1(int clk, int mosi, int miso, int cs) {
+uint16_t scanReadZ1(int clk, int mosi, int miso, int cs, bool mode3) {
   pinMode(clk, OUTPUT);
   pinMode(mosi, OUTPUT);
   pinMode(miso, INPUT);
   pinMode(cs, OUTPUT);
   digitalWrite(cs, HIGH);
-  digitalWrite(clk, LOW);
+  digitalWrite(clk, mode3 ? HIGH : LOW);  // Mode 3 = idle HIGH
   digitalWrite(mosi, LOW);
 
-  // Send Z1 command 0xB0
   digitalWrite(cs, LOW);
   uint8_t cmd = 0xB0;
   for (int i = 7; i >= 0; i--) {
     digitalWrite(mosi, (cmd >> i) & 1);
-    digitalWrite(clk, HIGH);
-    delayMicroseconds(2);
-    digitalWrite(clk, LOW);
-    delayMicroseconds(2);
+    if (mode3) {
+      // Mode 3: idle HIGH, data sampled on rising edge
+      digitalWrite(clk, LOW);
+      delayMicroseconds(2);
+      digitalWrite(clk, HIGH);
+      delayMicroseconds(2);
+    } else {
+      // Mode 0: idle LOW, data sampled on rising edge
+      digitalWrite(clk, HIGH);
+      delayMicroseconds(2);
+      digitalWrite(clk, LOW);
+      delayMicroseconds(2);
+    }
   }
   uint16_t result = 0;
   for (int i = 11; i >= 0; i--) {
+    if (mode3) {
+      digitalWrite(clk, LOW);
+      delayMicroseconds(2);
+      if (digitalRead(miso)) result |= (1 << i);
+      digitalWrite(clk, HIGH);
+      delayMicroseconds(2);
+    } else {
+      digitalWrite(clk, HIGH);
+      delayMicroseconds(2);
+      if (digitalRead(miso)) result |= (1 << i);
+      digitalWrite(clk, LOW);
+      delayMicroseconds(2);
+    }
+  }
+  if (!mode3) {
     digitalWrite(clk, HIGH);
     delayMicroseconds(2);
-    if (digitalRead(miso)) result |= (1 << i);
     digitalWrite(clk, LOW);
-    delayMicroseconds(2);
   }
-  digitalWrite(clk, HIGH);
-  delayMicroseconds(2);
-  digitalWrite(clk, LOW);
   digitalWrite(cs, HIGH);
   return result;
 }
@@ -125,26 +152,99 @@ void runTouchPinScan() {
   Serial.println("\n========================================");
   Serial.println("【Scan】Touch pin scan 開始 — 撳住畫面任何位置");
   Serial.println("========================================");
+
+  // ==========================================
+  // 第一階段: 試 FT6336 capacitive touch (I2C interface)
+  // 好多新版 CYD 用 FT6336 而唔係 XPT2046
+  // ==========================================
+  Serial.println("\n========== FT6336 I2C scan (capacitive touch) ==========");
+  Serial.println("  撳住畫面期間，下面每個 (SDA, SCL) pair 會試");
+
+  struct I2CPair { int sda; int scl; };
+  const I2CPair I2C_PAIRS[] = {
+    {21, 22},  // 最常見 FT6336
+    {27, 22},  // 另一個 variant
+    {32, 33},  // 同 touch SPI 重疊
+    {21, 27},
+  };
+  const int NUM_I2C = 4;
+
+  for (int i = 0; i < NUM_I2C; i++) {
+    auto& p = I2C_PAIRS[i];
+    Serial.printf("\n[I2C] 試 SDA=%d SCL=%d\n", p.sda, p.scl);
+    Wire.begin(p.sda, p.scl);
+    Wire.beginTransmission(0x38);  // FT6336 default I2C address
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      Serial.printf("  ✓ I2C device found at 0x38! 撳住畫面試讀 touch...\n");
+      delay(100);
+      // 讀 touch point count
+      Wire.beginTransmission(0x38);
+      Wire.write(0x02);  // TD_STATUS register
+      Wire.endTransmission();
+      Wire.requestFrom((int)0x38, 1);
+      uint8_t touchCount = Wire.read();
+      Serial.printf("  TD_STATUS = %d (touch points)\n", touchCount);
+
+      // 讀 X1, Y1 coordinates
+      if (touchCount > 0) {
+        Wire.beginTransmission(0x38);
+        Wire.write(0x03);
+        Wire.endTransmission();
+        Wire.requestFrom((int)0x38, 4);
+        uint16_t x = (Wire.read() & 0x0F) << 8 | Wire.read();
+        uint16_t y = (Wire.read() & 0x0F) << 8 | Wire.read();
+        Serial.printf("  Touch @ (X=%d, Y=%d) — 撳住唔放!\n", x, y);
+      }
+    } else {
+      Serial.printf("  ✗ 無 device at 0x38 (err=%d)\n", err);
+    }
+    delay(200);
+  }
+
+  // ==========================================
+  // 第二階段: XPT2046 SPI scan (舊版 touch)
+  // ==========================================
+
+  // 先試下 PENIRQ (GPIO 36) 嘅反應
+  Serial.println("\n【Scan】GPIO 36 (PENIRQ?) 靜態讀數:");
+  pinMode(36, INPUT);
+  for (int i = 0; i < 3; i++) {
+    int v = digitalRead(36);
+    Serial.printf("  GPIO36=%d (HIGH=%s, LOW=%s)\n", v, v ? "1" : "0", v ? "0" : "1");
+    delay(200);
+  }
+  Serial.println("  ⚠️ 撳住畫面期間再 log 一次，如果數值變咗 = 呢個 pin 接到 PENIRQ");
+
   delay(500);
 
-  for (int v = 0; v < 4; v++) {
-    auto& p = PIN_VARIANTS[v];
-    Serial.printf("\n【Scan】Variant %s\n", p.name);
+  for (int mode = 0; mode < 2; mode++) {
+    const char* modeName = (mode == 0) ? "SPI MODE 0 (CLK idle LOW)" : "SPI MODE 3 (CLK idle HIGH)";
+    Serial.printf("\n========== %s ==========\n", modeName);
 
-    uint16_t base = scanReadZ1(p.clk, p.mosi, p.miso, p.cs);
-    delay(50);
-    uint16_t touch = scanReadZ1(p.clk, p.mosi, p.miso, p.cs);
-    delay(50);
-    uint16_t release = scanReadZ1(p.clk, p.mosi, p.miso, p.cs);
+    for (int v = 0; v < 8; v++) {
+      auto& p = PIN_VARIANTS[v];
+      Serial.printf("\n【Scan】Variant %s\n", p.name);
 
-    Serial.printf("  base=%d  touch=%d  release=%d  delta=%d\n",
-                  base, touch, release, abs((int)touch - (int)release));
-    delay(100);
+      uint16_t base = scanReadZ1(p.clk, p.mosi, p.miso, p.cs, mode == 1);
+      delay(50);
+      uint16_t touch = scanReadZ1(p.clk, p.mosi, p.miso, p.cs, mode == 1);
+      delay(50);
+      uint16_t release = scanReadZ1(p.clk, p.mosi, p.miso, p.cs, mode == 1);
+
+      // Read GPIO 36 during scan
+      int irq = digitalRead(36);
+
+      Serial.printf("  base=%d  touch=%d  release=%d  delta=%d  IRQ(36)=%d\n",
+                    base, touch, release, abs((int)touch - (int)release), irq);
+      delay(100);
+    }
   }
 
   Serial.println("\n========================================");
-  Serial.println("【Scan】完成！邊個 variant 嘅 base/release 唔同 = 嗰組 pin work");
-  Serial.println("⚠️ 撳住畫面期間呢段先有意義 — release 同 base 應該差 0");
+  Serial.println("【Scan】完成！");
+  Serial.println("  ✓ Work = 任何 mode 嘅 touch ≠ release (即係 SPI 讀到變化)");
+  Serial.println("  ✓ IRQ 變 = GPIO 36 真係 PENIRQ");
   Serial.println("========================================\n");
 }
 
@@ -154,66 +254,61 @@ void runTouchPinScan() {
 #define XPT2046_CMD_Z1 0xB0  // 12-bit differential Z1 (pressure for detect)
 
 void touchInit() {
-  pinMode(T_CLK, OUTPUT);
-  pinMode(T_MOSI, OUTPUT);
-  pinMode(T_MISO, INPUT);
+  // ✅ Hardware SPI (HSPI) — 比 bit-bang 穩定好多
+  touchSPI.begin(T_CLK, T_MISO, T_MOSI, T_CS);
   pinMode(T_CS, OUTPUT);
   digitalWrite(T_CS, HIGH);
-  digitalWrite(T_CLK, LOW);
-  digitalWrite(T_MOSI, LOW);
-  Serial.println("【Touch】XPT2046 init done (software bit-bang SPI)");
+  Serial.println("【Touch】XPT2046 init done (HSPI hardware SPI)");
+}
+
+// ✅ Wake-up routine — 用 hardware SPI dummy reads 喚醒 XPT2046
+void touchWakeUp() {
+  Serial.println("【Touch】Waking up XPT2046 (20 dummy HSPI reads)...");
+  for (int i = 0; i < 20; i++) {
+    touchReadRaw(XPT2046_CMD_Z1);
+    delay(2);
+  }
+  Serial.println("【Touch】Wake-up done");
 }
 
 uint16_t touchReadRaw(uint8_t cmd) {
+  // ✅ Hardware SPI — ESP32 HSPI driver
+  // SPI mode 0 (CPOL=0, CPHA=0), 1MHz clock, MSB first
   digitalWrite(T_CS, LOW);
+  touchSPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
 
-  // Send 8-bit command (MSB first)
-  for (int i = 7; i >= 0; i--) {
-    digitalWrite(T_MOSI, (cmd >> i) & 1);
-    digitalWrite(T_CLK, HIGH);
-    delayMicroseconds(2);
-    digitalWrite(T_CLK, LOW);
-    delayMicroseconds(2);
-  }
+  // Send 8-bit command
+  touchSPI.transfer(cmd);
+  // XPT2046 needs ~2us to start driving MISO after 8th clock
+  // We use 16-bit transfer to read 12-bit data in one go (clock for conversion + data)
+  uint16_t result = touchSPI.transfer16(0x0000);
 
-  // XPT2046 喺第 8 個 clock 之後開始 drive MISO (bus turnaround)
-  // 讀 12-bit result
-  uint16_t result = 0;
-  for (int i = 11; i >= 0; i--) {
-    digitalWrite(T_CLK, HIGH);
-    delayMicroseconds(2);
-    if (digitalRead(T_MISO)) {
-      result |= (1 << i);
-    }
-    digitalWrite(T_CLK, LOW);
-    delayMicroseconds(2);
-  }
-
-  // 收尾 — send 2 個 clock cycle 釋放 bus
-  digitalWrite(T_CLK, HIGH);
-  delayMicroseconds(2);
-  digitalWrite(T_CLK, LOW);
-  delayMicroseconds(2);
-
+  touchSPI.endTransaction();
   digitalWrite(T_CS, HIGH);
-  return result;
+
+  // XPT2046 returns 12-bit value in bits 11-0 of the 16-bit result
+  return result >> 4;  // Shift to get 12-bit value (top 12 bits)
 }
 
 bool touchIsPressed() {
-  // 讀 Z1 (pressure) 兩次取平均 — 更穩定，避免 noise spike
+  // ✅ Hardware SPI 自動管理 pin modes
+  // 讀 3 次取 max — 防止某次 read 撞 noise
   uint16_t z1a = touchReadRaw(XPT2046_CMD_Z1);
+  delay(1);
   uint16_t z1b = touchReadRaw(XPT2046_CMD_Z1);
-  uint16_t z1 = (z1a + z1b) / 2;
+  delay(1);
+  uint16_t z1c = touchReadRaw(XPT2046_CMD_Z1);
+  uint16_t z1 = max(max(z1a, z1b), z1c);
 
-  // ✅ Debug log — 每 1 秒 log Z1 一次 (不論有冇撳) — debug 用
+  // Debug log — 每 1 秒
   static unsigned long lastLogTime = 0;
   unsigned long now = millis();
   if (now - lastLogTime > 1000) {
-    Serial.printf("【Touch】Z1=%d (Z1a=%d, Z1b=%d)\n", z1, z1a, z1b);
+    Serial.printf("【Touch】Z1=%d (a=%d b=%d c=%d)\n", z1, z1a, z1b, z1c);
     lastLogTime = now;
   }
 
-  return z1 > 30;  // 降低 threshold (50 → 30，更敏感)
+  return z1 > 30;
 }
 
 bool touchGetPoint(int* x, int* y) {
@@ -263,6 +358,36 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 #define LONG_PRESS_MS      10000                   // 長按 10 秒觸發 OTA page
 #define OTA_UPDATE_MAGIC   0x45555354              // "EUST" magic — 升級後寫住防止 boot loop
 
+// =====================================================
+// Flip Clock Display Mode (GPIO 0 button idle mode)
+// =====================================================
+// 24h HH:MM 7-segment LED-style jump-clock on the CYD 320x240 screen.
+
+// Colors (RGB565)
+#define FC_BG_COLOR        0x0000   // pure black
+#define FC_DIGIT_COLOR     0xFFFF   // white segments
+#define FC_HINT_COLOR      0x5070A0 // dim blue hint at bottom
+
+// 7-segment digit cell layout (70x200 each, full-screen fill)
+// Total inner width: 4*70 + 2*4 (digit gaps) + 2*6 (colon gaps) = 300
+// Side margin: (320-300)/2 = 10
+#define FC_CARD_W          70
+#define FC_CARD_H          200
+#define FC_CARD_Y          20   // top y of digit cells (leaves 20px top + 20px bottom)
+#define FC_LEFT_X          10   // hour tens
+#define FC_H1_X            84   // hour ones
+#define FC_COLON_X         160  // center x of colon
+#define FC_M0_X            166  // minute tens
+#define FC_M1_X            240  // minute ones (ends at 310, right margin 10)
+
+// Button state machine
+#define BTN_DEBOUNCE_MS    30
+#define DOUBLE_TAP_MS      3000
+#define SHORT_PRESS_MAX    2000
+#define LONG_PRESS_RESET   3000
+#define LONG_PRESS_OTA     3000
+#define BTN_HOLD_TIMEOUT   5000
+
 // OTA state
 enum OtaState {
   OTA_IDLE = 0,
@@ -280,6 +405,17 @@ String otaLatestVersion = "";
 String otaBinUrl = "";
 int otaProgress = 0;            // 0-100
 unsigned long otaTouchDown = 0;  // long-press timer
+
+// Flip clock mode
+bool flipClockMode = false;
+unsigned long lastFlipClockUpdate = 0;
+char fcPrevH0 = ' ', fcPrevH1 = ' ', fcPrevM0 = ' ', fcPrevM1 = ' ';  // for diff-redraw
+
+// GPIO 0 button state machine
+enum BtnState { BTN_IDLE, BTN_WAIT_RELEASE, BTN_WAIT_DOUBLE_TAP };
+BtnState btnState = BTN_IDLE;
+unsigned long btnPressStart = 0;
+unsigned long btnReleaseTime = 0;
 
 // =====================================================
 // 資料結構
@@ -1596,19 +1732,122 @@ void exitOTAPage() {
 }
 
 // =====================================================
-// OTA page 嘅 touch handler — 撳「立即升級」trigger performOTA()
+// OTA page 嘅 GPIO 0 button handler
+//   短撳 (< 1.5秒): 升級 (如有更新) / 退出 (否則)
+//   長撳 (>= 1.5秒): 強制退出
 // =====================================================
-void handleOTAPageTouch(int tx, int ty) {
-  // 撳「立即升級」按鈕範圍
-  if (otaState == OTA_AVAILABLE && tx >= 105 && tx <= 215 && ty >= 165 && ty <= 200) {
-    Serial.println("【OTA】撳立即升級");
-    performOTA(otaBinUrl);
-    drawOTAPage();  // 重畫顯示新狀態
-    return;
+void handleOTAPageButton() {
+  if (digitalRead(0) == LOW) {
+    unsigned long start = millis();
+    int count = 0;
+    while (digitalRead(0) == LOW && count < 50) { delay(100); count++; }
+    unsigned long held = millis() - start;
+
+    if (held < 1500) {
+      // 短撳
+      if (otaState == OTA_AVAILABLE) {
+        Serial.println("【OTA】GPIO 0 短撳觸發升級");
+        performOTA(otaBinUrl);
+        drawOTAPage();
+      } else {
+        Serial.println("【OTA】GPIO 0 短撳退出 OTA page");
+        exitOTAPage();
+      }
+    } else {
+      // 長撳
+      Serial.println("【OTA】GPIO 0 長撳強制退出 OTA page");
+      exitOTAPage();
+    }
   }
-  // 撳其他地方退出
-  Serial.println("【OTA】退出 OTA page");
-  exitOTAPage();
+}
+
+// =====================================================
+// GPIO 0 button state machine (主畫面時用)
+//   單撳 (< 2s, 3 秒內冇 follow-up)  → toggleFlipClock()
+//   雙撳 (3 秒內撳 2 下)             → enterConfigMode(true)
+//   長撳 2-3s                        → reset WiFi + reboot
+//   長撳 3+s                         → OTA check
+//   safety: held > 5s                → OTA check (force)
+// =====================================================
+void pollGPIO0Button() {
+  bool pressed = (digitalRead(0) == LOW);
+
+  switch (btnState) {
+    case BTN_IDLE: {
+      if (pressed) {
+        delay(BTN_DEBOUNCE_MS);
+        if (digitalRead(0) == LOW) {
+          btnPressStart = millis();
+          btnState = BTN_WAIT_RELEASE;
+        }
+      }
+      break;
+    }
+
+    case BTN_WAIT_RELEASE: {
+      if (!pressed) {
+        unsigned long held = millis() - btnPressStart;
+        btnReleaseTime = millis();
+
+        if (held < SHORT_PRESS_MAX) {
+          // 短撳 → 等 double-tap window
+          btnState = BTN_WAIT_DOUBLE_TAP;
+        } else if (held < LONG_PRESS_RESET) {
+          // 2-3s long press — reset WiFi
+          Serial.println("【Reset】GPIO 0 長撳 2 秒，reset WiFi + reboot");
+          WiFiManager wm;
+          wm.resetSettings();
+          ESP.restart();
+        } else {
+          // 3+s long press — OTA check
+          Serial.println("【OTA】GPIO 0 長撳 3 秒，觸發 OTA check");
+          triggerOTACheck();
+          btnState = BTN_IDLE;
+        }
+      } else if (millis() - btnPressStart > BTN_HOLD_TIMEOUT) {
+        // safety: held > 5s — force OTA
+        Serial.println("【OTA】GPIO 0 撳住 > 5 秒，強制 OTA check");
+        triggerOTACheck();
+        while (digitalRead(0) == LOW) delay(10);  // wait for release
+        btnState = BTN_IDLE;
+      }
+      break;
+    }
+
+    case BTN_WAIT_DOUBLE_TAP: {
+      if (pressed) {
+        delay(BTN_DEBOUNCE_MS);
+        if (digitalRead(0) == LOW) {
+          // confirmed double-tap!
+          Serial.println("【設定】GPIO 0 雙撳，入設定模式");
+          // If in flip clock mode, exit first
+          if (flipClockMode) {
+            flipClockMode = false;
+          }
+          enterConfigMode(true);
+          while (digitalRead(0) == LOW) delay(10);  // wait for release
+          btnState = BTN_IDLE;
+        }
+      } else if (millis() - btnReleaseTime > DOUBLE_TAP_MS) {
+        // double-tap window expired → single tap = toggle flip clock
+        Serial.println("【FlipClock】GPIO 0 單撳，toggle flip clock");
+        toggleFlipClock();
+        btnState = BTN_IDLE;
+      }
+      break;
+    }
+  }
+}
+
+// =====================================================
+// 觸發 OTA check + 顯示 OTA page (由 GPIO 0 長撳 3秒 觸發)
+// =====================================================
+void triggerOTACheck() {
+  Serial.println("【OTA】GPIO 0 長撳 3 秒，開始 check GitHub release");
+  otaState = OTA_CHECKING;
+  drawOTAPage();
+  checkLatestRelease();
+  drawOTAPage();
 }
 
 // =====================================================
@@ -1629,6 +1868,7 @@ void setup() {
 
   // ✅ Touch init (software bit-bang SPI，唔靠 LovyanGFX touch API)
   touchInit();
+  touchWakeUp();  // 多 read 喚醒 XPT2046
 
   lcd.setFont(&fonts::efontTW_16);
   lcd.setTextSize(1);
@@ -1678,87 +1918,153 @@ void setup() {
 }
 
 // =====================================================
+// 7-Segment LED-style jump clock (24h HH:MM, black bg, white segments)
+// =====================================================
+
+// 7-segment bitmask for digits 0-9 (bit 0=a, 1=b, 2=c, 3=d, 4=e, 5=f, 6=g)
+const uint8_t SEG7_MAP[10] = {
+  0x3F,  // 0
+  0x06,  // 1
+  0x5B,  // 2
+  0x4F,  // 3
+  0x66,  // 4
+  0x6D,  // 5
+  0x7D,  // 6
+  0x07,  // 7
+  0x7F,  // 8
+  0x6F   // 9
+};
+
+// Segment dimensions (within a 70x200 cell)
+const int SEG_H_LEN = 50;   // horizontal segment length
+const int SEG_V_LEN = 82;   // vertical segment length (h/2 - t - gap = 100-12-3 = 85 max)
+const int SEG_T      = 12;   // segment thickness
+const int SEG_R      = 2;    // segment end corner radius
+const int SEG_GAP    = 3;    // gap between segments
+
+// Draw a single 7-segment digit (0-9) at (cellX, cellY)
+void drawFlipDigit(int cellX, int cellY, char digit) {
+  // Clear cell first
+  lcd.fillRect(cellX, cellY, FC_CARD_W, FC_CARD_H, FC_BG_COLOR);
+
+  if (digit < '0' || digit > '9') return;
+  uint8_t s = SEG7_MAP[digit - '0'];
+  uint16_t c = FC_DIGIT_COLOR;
+
+  // Compute key positions
+  int cx    = cellX + FC_CARD_W / 2;
+  int yTop  = cellY + SEG_GAP;
+  int yMid  = cellY + FC_CARD_H / 2;
+  int yBot  = cellY + FC_CARD_H - SEG_T - SEG_GAP;
+  int xL    = cellX + SEG_GAP;
+  int xR    = cellX + FC_CARD_W - SEG_T - SEG_GAP;
+
+  // a: top horizontal
+  if (s & 0x01) lcd.fillRoundRect(cx - SEG_H_LEN/2, yTop, SEG_H_LEN, SEG_T, SEG_R, c);
+  // f: top-left vertical
+  if (s & 0x20) lcd.fillRoundRect(xL, yTop + SEG_T/2, SEG_T, SEG_V_LEN, SEG_R, c);
+  // b: top-right vertical
+  if (s & 0x02) lcd.fillRoundRect(xR, yTop + SEG_T/2, SEG_T, SEG_V_LEN, SEG_R, c);
+  // g: middle horizontal
+  if (s & 0x40) lcd.fillRoundRect(cx - SEG_H_LEN/2, yMid - SEG_T/2, SEG_H_LEN, SEG_T, SEG_R, c);
+  // e: bottom-left vertical
+  if (s & 0x10) lcd.fillRoundRect(xL, yMid, SEG_T, SEG_V_LEN, SEG_R, c);
+  // c: bottom-right vertical
+  if (s & 0x04) lcd.fillRoundRect(xR, yMid, SEG_T, SEG_V_LEN, SEG_R, c);
+  // d: bottom horizontal
+  if (s & 0x08) lcd.fillRoundRect(cx - SEG_H_LEN/2, yBot, SEG_H_LEN, SEG_T, SEG_R, c);
+}
+
+// Draw the colon (two filled circles)
+void drawFlipColon() {
+  lcd.fillCircle(FC_COLON_X, FC_CARD_Y + 90, 8, FC_DIGIT_COLOR);
+  lcd.fillCircle(FC_COLON_X, FC_CARD_Y + 150, 8, FC_DIGIT_COLOR);
+}
+
+// Full repaint (called when entering flip clock mode)
+void drawFlipClock(bool fullRedraw) {
+  if (fullRedraw) {
+    lcd.fillScreen(FC_BG_COLOR);
+
+    // 4 digits + colon
+    drawFlipDigit(FC_LEFT_X, FC_CARD_Y, '0');
+    drawFlipDigit(FC_H1_X,   FC_CARD_Y, '0');
+    drawFlipColon();
+    drawFlipDigit(FC_M0_X,   FC_CARD_Y, '0');
+    drawFlipDigit(FC_M1_X,   FC_CARD_Y, '0');
+  }
+}
+
+// 1Hz update — only redraws digits that changed
+void updateFlipClock() {
+  String t = getSystemTime();  // "HH:MM" 24h
+  if (t == "--:--") return;    // NTP not yet synced
+  if (t.length() < 5) return;
+
+  char h0 = t[0];
+  char h1 = t[1];
+  char m0 = t[3];
+  char m1 = t[4];
+
+  if (h0 != fcPrevH0) { drawFlipDigit(FC_LEFT_X, FC_CARD_Y, h0); fcPrevH0 = h0; }
+  if (h1 != fcPrevH1) { drawFlipDigit(FC_H1_X,   FC_CARD_Y, h1); fcPrevH1 = h1; }
+  if (m0 != fcPrevM0) { drawFlipDigit(FC_M0_X,   FC_CARD_Y, m0); fcPrevM0 = m0; }
+  if (m1 != fcPrevM1) { drawFlipDigit(FC_M1_X,   FC_CARD_Y, m1); fcPrevM1 = m1; }
+}
+
+// Toggle between bus data display and flip clock display.
+void toggleFlipClock() {
+  flipClockMode = !flipClockMode;
+  if (flipClockMode) {
+    Serial.println("【Clock】進入 jump clock mode");
+    fcPrevH0 = fcPrevH1 = fcPrevM0 = fcPrevM1 = ' ';  // force re-paint
+    drawFlipClock(true);
+    lastFlipClockUpdate = millis();
+  } else {
+    Serial.println("【Clock】返回 bus data");
+    displayCurrentPage();
+  }
+}
+
+// =====================================================
 // Main loop
 // =====================================================
 void loop() {
   // ==========================================
-  // OTA page 長按偵測 + touch handler (優先於其他)
+  // OTA page 進行中 → 用 GPIO 0 button 控制，唔做其他嘢
   // ==========================================
-  if (touchIsPressed()) {
-    if (otaTouchDown == 0) {
-      otaTouchDown = millis();
-      Serial.println("【OTA】撳到喇，繼續長按 10 秒觸發 OTA");
+  if (otaState != OTA_IDLE) {
+    if (otaState == OTA_DOWNLOADING || otaState == OTA_SUCCESS) {
+      delay(100);
+      return;
     }
-
-    // ✅ Long-press 進度 log (3s / 6s / 9s) — 等 user 知道有反應
-    unsigned long held = millis() - otaTouchDown;
-    static unsigned long lastProgressLog = 0;
-    if (otaState == OTA_IDLE && held > 0 && held < LONG_PRESS_MS &&
-        millis() - lastProgressLog > 1500) {
-      int secLeft = (LONG_PRESS_MS - held) / 1000 + 1;
-      Serial.printf("【OTA】長按中... 仲要多 %d 秒觸發 OTA\n", secLeft);
-      lastProgressLog = millis();
-    }
-
-    // OTA page 顯示中：唔處理長按 timeout (因為下面 handleOTAPageTouch 已經 return)
-    if (otaState != OTA_IDLE) {
-      int rawX, rawY;
-      if (touchGetPoint(&rawX, &rawY)) {
-        int tx, ty;
-        mapTouchToLCD(rawX, rawY, &tx, &ty);
-        handleOTAPageTouch(tx, ty);
-      }
-      otaTouchDown = 0;  // reset
-    }
-    // 長按 10 秒 → 觸發 OTA page
-    else if (held >= LONG_PRESS_MS) {
-      Serial.printf("【OTA】✓ 長按 10 秒偵測到，入 OTA page\n");
-      otaTouchDown = 0;
-      otaState = OTA_CHECKING;
-      drawOTAPage();              // 先畫「檢查中...」避免空屏 10s
-      checkLatestRelease();        // 同步等 check 完，再畫結果
-      drawOTAPage();               // 重畫最新狀態
-      // 唔 return — 繼續 loop 等 user 撳掣或退出
-    }
-  } else {
-    otaTouchDown = 0;
-  }
-
-  // OTA page 進行中 → 唔做其他嘢 (例如唔好干擾下載)
-  if (otaState == OTA_DOWNLOADING || otaState == OTA_SUCCESS) {
-    delay(100);
+    handleOTAPageButton();  // 等 GPIO 0 button 短/長撳
+    delay(50);
     return;
   }
 
-  // GPIO 0 按鈕處理:
-  //   短撳 (< 2 秒): 入設定模式 (WiFiManager)
-  //   長撳 2-3 秒: reset WiFi 設定 + reboot
-  //   長撳 3+ 秒: 跑 touch pin scan (debug 用)
-  if (digitalRead(0) == LOW) {
-    int count = 0;
-    while (digitalRead(0) == LOW && count < 50) { delay(100); count++; }
-    if (count >= 30) {
-      Serial.println("【Scan】GPIO 0 長撳 3 秒，run touch pin scan");
-      runTouchPinScan();
-      delay(2000);
-    } else if (count >= 20) {
-      Serial.println("【Reset】GPIO 0 長撳 2 秒，reset WiFi + reboot");
-      WiFiManager wm;
-      wm.resetSettings();
-      ESP.restart();
-    } else {
-      Serial.println("【設定】GPIO 0 短撳，入設定模式 (backup for touch fail)");
-      enterConfigMode(true);
+  // ==========================================
+  // GPIO 0 button state machine (主畫面時):
+  //   單撳 → toggle flip clock
+  //   雙撳 (3s 內撳 2 下) → 入設定模式
+  //   長撳 2-3s → reset WiFi
+  //   長撳 3+秒 → OTA check
+  // ==========================================
+  pollGPIO0Button();
+
+  // ==========================================
+  // Flip clock mode → 1Hz 更新時間，跳過 bus/weather loop
+  // ==========================================
+  if (flipClockMode) {
+    if (millis() - lastFlipClockUpdate >= 1000) {
+      updateFlipClock();
+      lastFlipClockUpdate = millis();
     }
+    delay(50);
+    return;
   }
 
   if (stopCount == 0) {
-    return;
-  }
-
-  // ✅ OTA page 顯示中 (但非 download 中) → 唔好 overwrite OTA page
-  if (otaState != OTA_IDLE && otaState != OTA_DOWNLOADING && otaState != OTA_SUCCESS) {
-    delay(50);
     return;
   }
 
