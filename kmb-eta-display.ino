@@ -17,9 +17,14 @@ SPIClass touchSPI(HSPI);
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 
-// ✅ 沒有額外 font file — 用 efontTW_16 (4500+ 繁體) 加自製「埗」bitmap overlay
+// ✅ 沒有額外 font file — 用 efontTW_16 (u8g2 點陣字, 108 ASCII + 371 CJK)
+//    加自製 bitmap overlay 補字 (見下方 glyph_overlays.h)
 // 因為 gb2312a font 太大 (163KB) 會爆 firmware (1.875MB limit)
-// 所以我哋只畫「埗」一個字嘅 bitmap (32 bytes)，其他字用 efontTW_16
+//
+// ⚠️ efontTW_16 覆蓋率實測 (對過全量 KMB stop + route 資料):
+//    站名 1118 個字 → 缺 17 個, 目的地 454 個字 → 缺 5 個
+//    實際會出現嘅缺失字只有 埗 邨 鰂 脷 · → 已用 bitmap overlay 補齊
+// ⚠️ 呢個字型冇 emoji / ✓✗⚙🔄 之類符號, LCD 上唔可以用 (只會顯示空白)
 
 // ✅ Forward declarations — Arduino IDE 會喺 .ino file 頂部自動插入所有 function prototype
 // 但 IDE 唔識 struct 嘅 forward dependency。如果 prototype (例如 drawBusLine(BusGroup&))
@@ -68,61 +73,72 @@ public:
 LGFX_CYD lcd;
 
 // =====================================================
-// ✅ 自製「埗」character bitmap (16x16, 1-bit MSB-first)
-// 因為 efontTW_16 唔包「埗」(HK 罕見字 U+57D7)，用 LovyanGFX drawBitmap overlay
-// 結構：上面「土」(rows 1-6)，下面「步」(rows 8-15)
+// 缺失字形 bitmap overlay (取代舊嘅手繪「埗」bitmap)
+//
+// efontTW_16 (LovyanGFX u8g2 字型) 覆蓋 KMB 站名/目的地 1118 個字裡面嘅 1101 個。
+// 實際資料會出現但字型冇嘅字:
+//   埗 U+57D7 (深水埗, 16 條路線)    邨 U+90A8 (322 條路線 ← 最多)
+//   鰂 U+9C02 (鰂魚涌)              脷 U+8137 (鴨脷洲)
+//   · U+00B7 (路線 B1 目的地)
+// → 用 16x16 1-bit bitmap overlay 補上, 唔會改字
+// 其餘 12 個 (峯/栢/滙/琼/窰/蔴/乪/䃟/担/叠/麖/鱲) 已對過全量 route + stop 資料, 唔會出現
 // =====================================================
-//
-//  16x16 埗 嘅 visual design (1 = pixel on, 0 = pixel off):
-//
-//     0 1 2 3 4 5 6 7 8 9 A B C D E F
-//   0 . . . . . . . . . . . . . . . .
-//   1 . . X X X X X X X X X X X . . .   ← 土 top horizontal
-//   2 . . . . . . . . . . . . . . . .
-//   3 . . . . . . . X X . . . . . . .   ← 土 vertical
-//   4 . . . . . . . X X . . . . . . .   ← 土 vertical
-//   5 . . X X X X X X X X X X X . . .   ← 土 bottom horizontal
-//   6 . . . . . . . . . . . . . . . .
-//   7 . . . X X X X X X . . . . . . .   ← 止 top
-//   8 . . . X . . . X . . . . . . . .   ← 止 left + right
-//   9 . . . X . . . X . . . . . . . .   ← 止 verticals
-//   A . . . X X X X X . . . . . . . .   ← 止 bottom
-//   B . . . X . . . . X X X X X . . .   ← 少 top horizontal
-//   C . . . X . . . . X . . . . . . .   ← 少 vertical
-//   D . . . X . . . . X . . . . . . .
-//   E . . . X . . . . X . . . . . . .
-//   F . . . X . . . . X . . . . . . .   ← 底 (vertical strokes continue down)
-//
-static const uint8_t charBu16x16[32] = {
-  0x00, 0x00,  // row 0
-  0xFF, 0xC0,  // row 1: 土 top
-  0x00, 0x00,  // row 2
-  0x06, 0x00,  // row 3: 土 vertical
-  0x06, 0x00,  // row 4: 土 vertical
-  0xFF, 0xC0,  // row 5: 土 bottom horizontal
-  0x00, 0x00,  // row 6
-  0x3E, 0x00,  // row 7: 止 top horizontal (x=1-5)
-  0x22, 0x00,  // row 8: 止 verticals
-  0x22, 0x00,  // row 9: 止 verticals
-  0x3E, 0x00,  // row A: 止 bottom horizontal
-  0x23, 0xE0,  // row B: 少 top horizontal
-  0x22, 0x00,  // row C: 少 vertical
-  0x22, 0x00,  // row D
-  0x22, 0x00,  // row E
-  0x22, 0x00,  // row F
-};
+#include "glyph_overlays.h"
 
-// ✅ Draw 埗 bitmap at (x, y) with given color
-// 因為 chinese3 font 唔包呢個字，我哋用 efontTW_16 畫 "深水" + bitmap overlay "埗" + " ETA"
-void drawCharBu(int x, int y, uint16_t color) {
-  // drawBitmap signature: (x, y, bitmap_data, w, h, color)
-  lcd.drawBitmap(x, y, (uint8_t*)charBu16x16, 16, 16, color);
+// =====================================================
+// 除錯開關: 1 = 每次畫字都 log 出嚟 (查亂碼 / 查寬度用)
+//   會 print「字串 + 闊度 + 邊幾個字冇字形」
+//   平時留 0, 唔會拖慢 LCD
+// =====================================================
+#define DEBUG_DRAW_TEXT 0
+
+// 回傳 encoding 對應嘅 bitmap, 冇就 nullptr
+const uint8_t* findGlyphOverlay(const char* p) {
+  for (int i = 0; i < GLYPH_OVERLAY_COUNT; i++) {
+    if (strncmp(p, GLYPH_OVERLAYS[i].utf8, 3) == 0) return GLYPH_OVERLAYS[i].bitmap;
+  }
+  return nullptr;
 }
 
-// ✅ Draw a string with 埗 (U+57D7) bitmap substitution
-// 處理 s "深水埗" → 畫 "深水" (efontTW_16) + 埗 bitmap + 後續 (efontTW_16)
-// 用 lcd.textWidth() 量度準確寬度（用嚟做 marquee）
-// ⚠️ 用 lcd.drawString() 而唔係 lcd.print() → 避免 text wrap 去下一行 (解決 13M 兩份 copy 重疊 bug)
+// 該 encoding 用咗幾多 byte (只支援 UTF-8 BMP 範圍的字)
+inline int utf8Len(unsigned char c) {
+  if (c < 0x80) return 1;
+  if ((c & 0xE0) == 0xC0) return 2;
+  return 3;
+}
+
+#if DEBUG_DRAW_TEXT
+// 印出字串, 同埋標示每個字係「字型有」/「bitmap 補」/「兩個都冇 (會空白)」
+void debugDumpString(const char* tag, const char* s, int width) {
+  Serial.printf("【Draw】%s w=%d: %s\n", tag, width, s);
+  const char* p = s;
+  int missing = 0;
+  while (*p) {
+    if (findGlyphOverlay(p)) { p += 3; continue; }
+    int n = utf8Len((unsigned char)*p);
+    char buf[8] = {0};
+    memcpy(buf, p, (n < 7) ? n : 7);
+    // 用 lcd.textWidth 側面探測: 冇字形嘅字唔會佔寬度
+    if (lcd.textWidth(buf) == 0) {
+      Serial.printf("   ⚠️ 冇字形 (會空白): %s  U+", buf);
+      unsigned int cp = 0;
+      if (n == 3) cp = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+      else if (n == 2) cp = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+      else cp = (unsigned char)p[0];
+      Serial.printf("%04X\n", cp);
+      missing++;
+    }
+    p += n;
+  }
+  if (missing) Serial.printf("   → 共 %d 個字冇字形\n", missing);
+}
+#endif
+
+// =====================================================
+// 畫字串 + bitmap overlay 補字
+// 例: "深水埗 ETA" → drawString("深水") + bitmap(埗) + drawString(" ETA")
+// ⚠️ 用 lcd.drawString() 而唔係 lcd.print() → 唔會 wrap 去下一行
+// =====================================================
 int drawStringWithBu(const char* s, int x, int y, uint16_t color) {
   lcd.setFont(&fonts::efontTW_16);
   lcd.setTextSize(1);
@@ -130,41 +146,67 @@ int drawStringWithBu(const char* s, int x, int y, uint16_t color) {
 
   int curX = x;
   const char* p = s;
-  const char* BU_UTF8 = "\xe5\x9d\x97";  // 埗 UTF-8 (3 bytes)
-  size_t buLen = 3;
 
   while (*p) {
-    // Check if current position starts with 埗
-    if (strncmp(p, BU_UTF8, buLen) == 0) {
-      // 埗 found → draw bitmap
-      drawCharBu(curX, y, color);
-      curX += 16;  // bitmap width
-      p += buLen;
-    } else {
-      // Find next 埗 (or end of string)
-      const char* nextBu = strstr(p, BU_UTF8);
-      size_t chunkLen = nextBu ? (size_t)(nextBu - p) : strlen(p);
-
-      if (chunkLen > 0) {
-        // Use a temp buffer for the chunk
-        char buf[256];
-        if (chunkLen >= sizeof(buf)) chunkLen = sizeof(buf) - 1;
-        memcpy(buf, p, chunkLen);
-        buf[chunkLen] = '\0';
-
-        // ✅ 用 drawString() 而唔係 print() → 唔會 wrap 去下一行
-        lcd.drawString(buf, curX, y);
-        curX += lcd.textWidth(buf);
-      }
-      p += chunkLen;
+    const uint8_t* bmp = findGlyphOverlay(p);
+    if (bmp) {
+      // lcd.drawString() 會將字身抬高 2px (u8g2 y_offset = -2),
+      // bitmap 已經預留同樣嘅 2px 上邊距, 所以直接畫就同旁邊嘅字對齊
+      lcd.drawBitmap(curX, y, bmp, 16, 16, color);
+      curX += 16;
+      p += 3;
+      continue;
     }
+
+    // 搵下一個 overlay 字 (或者字串尾)
+    const char* next = p + utf8Len((unsigned char)*p);
+    while (*next && !findGlyphOverlay(next)) next += utf8Len((unsigned char)*next);
+
+    size_t chunkLen = (size_t)(next - p);
+    if (chunkLen > 0) {
+      char buf[256];
+      if (chunkLen >= sizeof(buf)) chunkLen = sizeof(buf) - 1;
+      memcpy(buf, p, chunkLen);
+      buf[chunkLen] = '\0';
+
+      lcd.drawString(buf, curX, y);
+      curX += lcd.textWidth(buf);
+    }
+    p += chunkLen;
   }
+
+#if DEBUG_DRAW_TEXT
+  debugDumpString("lcd", s, curX - x);
+#endif
   return curX - x;
 }
 
 int drawStringWithBu(const String& s, int x, int y, uint16_t color) {
   return drawStringWithBu(s.c_str(), x, y, color);
 }
+
+// 量度含 overlay 字嘅字串實際闊度 (跑馬燈同截字要用)
+int textWidthWithBu(const char* s) {
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+  int w = 0;
+  const char* p = s;
+  while (*p) {
+    if (findGlyphOverlay(p)) { w += 16; p += 3; continue; }
+    const char* next = p + utf8Len((unsigned char)*p);
+    while (*next && !findGlyphOverlay(next)) next += utf8Len((unsigned char)*next);
+    char buf[256];
+    size_t n = (size_t)(next - p);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, p, n);
+    buf[n] = '\0';
+    w += lcd.textWidth(buf);
+    p += n;
+  }
+  return w;
+}
+
+int textWidthWithBu(const String& s) { return textWidthWithBu(s.c_str()); }
 
 // =====================================================
 // XPT2046 Touch Driver — software bit-bang SPI
@@ -176,12 +218,16 @@ int drawStringWithBu(const String& s, int x, int y, uint16_t color) {
 #define T_MISO 39
 #define T_CS 33
 
-// ⚠️ 如果上面嗰組 pin 唔 work，scan 下面 3 組常見 CYD variant
-//    開頭 `//` 嗰組就用，最尾冇 `//` 嗰組就用
-// Variant A: Sunton CYD v1 (預設): CLK=26 MOSI=32 MISO=39 CS=33
-// Variant B: 另一款:                CLK=25 MOSI=33 MISO=39 CS=26
-// Variant C: Elecrow:               CLK=25 MOSI=33 MISO=36 CS=26
+// =====================================================
+// ⚠️ 以下係一整套 touch pin 診斷工具 (runTouchPinScan),
+//    只係換 CYD 板子 / touch 完全冇反應時才需要手動呼叫。
+//    平時唔用 → 用 ENABLE_TOUCH_PIN_SCAN 包住, 免得佔 flash
+//    同埋撳 GPIO 0 時撞到呢啲 pin。要用就把下面 0 改成 1,
+//    再喺 setup() 加 runTouchPinScan();
+// =====================================================
+#define ENABLE_TOUCH_PIN_SCAN 0
 
+#if ENABLE_TOUCH_PIN_SCAN
 // Pin-scan diagnostic — 用 GPIO 0 撳落去觸發
 struct PinVariant {
   const char* name;
@@ -351,6 +397,8 @@ void runTouchPinScan() {
   Serial.println("========================================\n");
 }
 
+#endif  // ENABLE_TOUCH_PIN_SCAN
+
 // XPT2046 command bytes
 #define XPT2046_CMD_X  0x90  // 12-bit differential X position
 #define XPT2046_CMD_Y  0xD0  // 12-bit differential Y position
@@ -405,6 +453,14 @@ bool touchIsPressed() {
   return z1 > 30;
 }
 
+// =====================================================
+// ⚠️ 未使用: 讀 XPT2046 原始座標 (校準用)
+//    而家 tap 偵測只靠 touchIsPressed(), 唔需要座標 (避免 calibration 偏差)
+//    要校準嘅話把下面 0 改成 1, 再自己喺 loop 呼叫 touchGetPoint()
+// =====================================================
+#define ENABLE_TOUCH_RAW_POINT 0
+
+#if ENABLE_TOUCH_RAW_POINT
 bool touchGetPoint(int* x, int* y) {
   // Warm-up reads (丟第一次嘅轉換結果)
   touchReadRaw(XPT2046_CMD_X);
@@ -425,6 +481,7 @@ bool touchGetPoint(int* x, int* y) {
   Serial.printf("【Touch】X=%d Y=%d valid=%s\n", *x, *y, valid ? "YES" : "NO");
   return valid;
 }
+#endif  // ENABLE_TOUCH_RAW_POINT
 
 Preferences preferences;
 bool shouldSaveConfig = false;
@@ -445,12 +502,11 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.5"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.6"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
-#define LONG_PRESS_MS      10000                   // 長按 10 秒觸發 OTA page
-#define OTA_UPDATE_MAGIC   0x45555354              // "EUST" magic — 升級後寫住防止 boot loop
+// (已移除未使用嘅 LONG_PRESS_MS / OTA_UPDATE_MAGIC — 兩者都冇任何地方引用)
 
 // =====================================================
 // Flip Clock Display Mode (GPIO 0 button idle mode)
@@ -498,7 +554,6 @@ OtaState otaState = OTA_IDLE;
 String otaLatestVersion = "";
 String otaBinUrl = "";
 int otaProgress = 0;            // 0-100
-unsigned long otaTouchDown = 0;  // long-press timer
 
 // Flip clock mode
 bool flipClockMode = false;
@@ -736,13 +791,6 @@ void saveConfigCallback() {
   shouldSaveConfig = true;
 }
 
-String fixHongKongWords(String input) {
-  // ⚠️ 用戶明確表示唔可以隨便更改字 (唔可以將「埗」改「步」)
-  // 所以淨係處理一啲肯定要換嘅字 (例如政府官方用「的」但我哋想用「的」之類)
-  // 而家冇任何替換 — 全部用原字
-  return input;
-}
-
 String getSystemTime() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo)) return "--:--";
@@ -811,7 +859,7 @@ void fetchStopName(int stopIdx) {
       if (!error) {
         const char* name = doc["data"]["name_tc"];
         if (name != nullptr && strlen(name) > 0) {
-          stops[stopIdx].stopName = fixHongKongWords(String(name));
+          stops[stopIdx].stopName = String(name);
           Serial.printf("【API】Stop %d (%s) 站名: %s\n",
                         stopIdx + 1,
                         stops[stopIdx].stopId.c_str(),
@@ -1153,10 +1201,30 @@ void displayCurrentPage() {
   lcd.drawFastHLine(0, 19, 320, TFT_DARKGREY);
 
   // Header (y=22 至 y=40)
-  // ✅ efontTW_16 + drawStringWithBu 處理 stopName 內嘅「埗」(bitmap overlay)
+  // ✅ efontTW_16 + drawStringWithBu 處理 stopName 內嘅缺失字 (bitmap overlay)
+  // ⚠️ 左邊止於 x=185: 右邊 195..320 係時間 (0..79px) + 頁數 (265..320)
+  //    站名太長就截短, 唔可以壓過去 (以前冇截 → 站名同時間重疊)
   lcd.setFont(&fonts::efontTW_16);
   if (stops[stopIdx].stopName != "") {
-    drawStringWithBu(stops[stopIdx].stopName + " ETA", 10, 24, TFT_YELLOW);
+    const int HEADER_LEFT = 10, HEADER_RIGHT = 185;
+    String header = stops[stopIdx].stopName + " ETA";
+    if (textWidthWithBu(header) > HEADER_RIGHT - HEADER_LEFT) {
+      // 逐個字砍到夠窄為止 (由尾砍, 保持 UTF-8 完整)
+      while (header.length() > 0 && textWidthWithBu(header + "…") > HEADER_RIGHT - HEADER_LEFT) {
+        int cut = utf8Len((unsigned char)header[header.length() - 1]);
+        header.remove(header.length() - cut);
+      }
+      header += "…";
+      // 連 "…" 都放唔落就索性唔顯示 " ETA"
+      if (textWidthWithBu(header) > HEADER_RIGHT - HEADER_LEFT) {
+        header = stops[stopIdx].stopName;
+        while (header.length() > 0 && textWidthWithBu(header) > HEADER_RIGHT - HEADER_LEFT) {
+          int cut = utf8Len((unsigned char)header[header.length() - 1]);
+          header.remove(header.length() - cut);
+        }
+      }
+    }
+    drawStringWithBu(header, HEADER_LEFT, 24, TFT_YELLOW);
   } else {
     lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
     lcd.setCursor(10, 24);
@@ -1232,14 +1300,23 @@ void updateBusData() {
 
             if (eta != nullptr && strlen(eta) > 0 && String(eta) != "") {
               String routeStr = (route != nullptr) ? String(route) : "";
-              String destStr = (dest_tc != nullptr) ? fixHongKongWords(String(dest_tc)) : "";
+              String destStr = (dest_tc != nullptr) ? String(dest_tc) : "";
               String timePart = String(eta).substring(11, 16);
 
+              // 1) 完全一樣 (路線 + 目的地) → 併入
               int matchIdx = -1;
               for (int g = 0; g < stops[s].totalGroups; g++) {
                 if (stops[s].groups[g].route == routeStr && stops[s].groups[g].dest == destStr) {
                   matchIdx = g;
                   break;
+                }
+              }
+
+              // 2) 同路線, 目的地字串少少唔同 (API 有時會加/減「(經…)」之類)
+              //    → 併入現有嗰行, 唔好開新行 (唔係嘅話同一路線會撐爆 40 行上限)
+              if (matchIdx == -1) {
+                for (int g = 0; g < stops[s].totalGroups; g++) {
+                  if (stops[s].groups[g].route == routeStr) { matchIdx = g; break; }
                 }
               }
 
@@ -1261,6 +1338,8 @@ void updateBusData() {
           }
 
           // 計算字串寬度，判斷邊行要跑馬燈
+          // ⚠️ 一定要用 textWidthWithBu(): lcd.textWidth() 唔知 bitmap overlay,
+          //    會少算 16px, 令跑馬燈寬度同實際差一個字 → 兩份 copy 疊埋 (重疊 bug)
           lcd.setFont(&fonts::efontTW_16);
           for (int i = 0; i < stops[s].totalGroups; i++) {
             String timeString = "";
@@ -1269,7 +1348,7 @@ void updateBusData() {
             }
             stops[s].groups[i].fullText = stops[s].groups[i].route + " 往 " +
                                           stops[s].groups[i].dest + " " + timeString;
-            stops[s].groups[i].textWidth = lcd.textWidth(stops[s].groups[i].fullText);
+            stops[s].groups[i].textWidth = textWidthWithBu(stops[s].groups[i].fullText);
             stops[s].groups[i].scrollX = 0;
             stops[s].groups[i].needMarquee = (stops[s].groups[i].textWidth > maxDisplayWidth);
           }
@@ -1417,31 +1496,32 @@ void enterConfigMode(bool blocking) {
     Serial.printf("【Web】DNS:     %s\n", WiFi.dnsIP().toString().c_str());
     Serial.println("========================================");
 
+    // ⚠️ 一定要 setTextSize(1)
+    //    efontTW_16 本身已經係 16px 點陣字, 開 size 2 會變 32x32:
+    //    「進入設定模式」= 6 字 × 32 = 192px (連埋高度 32+ 都會壓到下面嘅字),
+    //    「用手機連 WiFi」+ size 2 更加會爆出 320px 畫面 → 睇落就係亂碼/疊字
+    lcd.setTextSize(1);
     lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
     lcd.setCursor(10, 50);
-    lcd.setTextSize(2);
     lcd.println("進入設定模式");
 
-    lcd.setTextSize(1);
     lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-    lcd.setCursor(10, 100);
+    lcd.setCursor(10, 90);
     lcd.println("用手機/電腦開瀏覽器:");
 
     lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-    lcd.setTextSize(1);
-    lcd.setCursor(10, 130);
+    lcd.setCursor(10, 120);
     lcd.printf("http://%s/", ip.toString().c_str());
 
-    lcd.setTextSize(1);
     lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-    lcd.setCursor(10, 180);
+    lcd.setCursor(10, 160);
     lcd.println("改完按 Save → 自動重啟");
 
     lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    lcd.setCursor(10, 210);
-    lcd.printf("SSID:%s  RSSI:%ddBm", WiFi.SSID().c_str(), WiFi.RSSI());
-    lcd.setCursor(10, 230);
-    lcd.printf("Subnet: %s", WiFi.subnetMask().toString().c_str());
+    lcd.setCursor(10, 200);
+    lcd.printf("SSID:%s", WiFi.SSID().c_str());
+    lcd.setCursor(10, 225);
+    lcd.printf("RSSI:%ddBm", WiFi.RSSI());
 
     // Register routes + start server
     configServer.on("/", HTTP_GET, handleConfigRoot);
@@ -1467,7 +1547,7 @@ void enterConfigMode(bool blocking) {
         lcd.fillRect(230, 24, 90, 18, TFT_BLACK);  // 清舊 badge
         lcd.setTextColor(TFT_RED, TFT_BLACK);
         lcd.setCursor(230, 24);
-        lcd.print("⚙ CONFIG");
+        lcd.print("[CONFIG]");
         Serial.printf("【Web】config mode alive (%lu sec elapsed)\n", (millis() - startMs) / 1000);
       }
 
@@ -1482,18 +1562,17 @@ void enterConfigMode(bool blocking) {
 
   } else {
     // ⚠️ WiFi 未連線 → Fallback 用 WiFiManager (緊急 reconnect WiFi)
+    //    同上一段一樣: 全部 size 1 (size 2 嘅 "ESP32_Smart_Clock" 會係 512px 闊, 爆畫面)
+    lcd.setTextSize(1);
     lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
-    lcd.setCursor(10, 80);
-    lcd.setTextSize(2);
+    lcd.setCursor(10, 70);
     lcd.println("WiFi 未連線");
 
-    lcd.setTextSize(1);
     lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-    lcd.setCursor(10, 130);
+    lcd.setCursor(10, 120);
     lcd.println("用手機連 WiFi:");
-    lcd.setCursor(50, 155);
     lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-    lcd.setTextSize(2);
+    lcd.setCursor(10, 150);
     lcd.println("ESP32_Smart_Clock");
     lcd.setCursor(10, 200);
     lcd.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -1664,12 +1743,25 @@ void checkLatestRelease() {
 
 // =====================================================
 // OTA: 下載 .bin + flash (blocking，畫面會 freeze 直至完成)
-// ✅ v1.0.4 fix:
-//   - v1.0.3 manual redirect 成功 (302 → 200) 但 read 第一次就 EOF
-//   - 原因: WiFiClientSecure 喺 redirect 過程中 SSL state 污染 / socket buffer 已 drain
-//   - Fix: redirect 之後用全新嘅 WiFiClientSecure + 將 GET 改成 read 整個 response body 喺 buffer
-//   - 簡化: 用 http.getString() 拎 Content-Length header，然後 stream 下載
+//
+// ✅ v1.0.6 fix — 「read 提前 EOF」真正原因:
+//   ESP32 Arduino core 3.x 嘅 Stream::readBytes() 係逐個 byte 呼叫 read()。
+//   而 NetworkClientSecure::read() 係「唔夠 data 就即刻 return -1」嘅語意
+//   (internal ssl buffer 空 → WANT_READ → -1)。所以只要 TLS record 之間有
+//   少少抖動，readBytes() 就會讀少幾個 byte 或者直接 return 0。
+//   舊 code 將 read <= 0 當成「致命 EOF」→ 即刻 Update.abort()，
+//   之後 loop() 因為 otaState 唔再係 OTA_IDLE 就淨係 delay() 空轉，
+//   表面睇落就好似下載「停咗 / 斷咗線」。
+//
+//   Fix (對齊官方 Update.writeStream() 嘅 retry 策略):
+//     1. read <= 0 唔再即刻當 fatal — 100ms 後重試，最多 30 秒冇新 data 才放棄
+//     2. 每次讀 2KB (唔再 1KB 逐個 byte 拗)，減少 per-byte read() 開銷
+//     3. 完成後核對 written == Content-Length
+//     4. 失敗前 dump 完整診斷 (connected / available / heap) 方便再查
 // =====================================================
+#define OTA_READ_BUF        2048                   // 每次讀取 byte 數
+#define OTA_STALL_LIMIT     300                    // 連續讀唔到 × 100ms = 最多等 30 秒
+
 void performOTA(String binUrl) {
   otaState = OTA_DOWNLOADING;
   otaProgress = 0;
@@ -1736,8 +1828,17 @@ void performOTA(String binUrl) {
 
   int total = http->getSize();
   Serial.printf("【OTA】Content-Length: %d bytes (%.2f MB)\n", total, total / 1048576.0);
+  Serial.printf("【OTA】free heap = %u bytes\n", ESP.getFreeHeap());
   if (total <= 0 || total > 2 * 1024 * 1024) {
     Serial.printf("【OTA】❌ size 異常 %d\n", total);
+    otaState = OTA_ERROR;
+    http->end(); delete http; delete client;
+    return;
+  }
+  // ✅ app partition (PartitionScheme=min_spiffs) = 0x1E0000 = 1966080 bytes
+  //    image 大過 partition 嘅話 Update.begin() 會即 fail，所以早啲講清楚
+  if (total > 1961984) {
+    Serial.printf("【OTA】❌ bin (%d) 大過 app partition (%d) — 縮細 firmware 或改 PartitionScheme\n", total, 1961984);
     otaState = OTA_ERROR;
     http->end(); delete http; delete client;
     return;
@@ -1760,53 +1861,80 @@ void performOTA(String binUrl) {
     return;
   }
 
-  // ✅ Check stream 連線 state + 預先 peek 第一 byte 確保 socket 唔係 dead
   Serial.printf("【OTA】stream connected=%d, available=%d\n", stream->connected(), stream->available());
-  if (stream->available() == 0) {
-    Serial.println("【OTA】⚠ stream available=0, 等 200ms 睇有冇 data...");
-    delay(200);
-    Serial.printf("【OTA】after 200ms: available=%d\n", stream->available());
-    if (stream->available() == 0) {
-      Serial.println("【OTA】❌ stream 冇 data — socket 可能被 server close 咗");
-      otaState = OTA_ERROR;
-      Update.abort();
-      http->end(); delete http; delete client;
-      return;
-    }
+
+  // ✅ 用 heap 唔用 stack — loop task 得 8KB stack，2KB buffer 落 stack 太搏
+  uint8_t *buf = (uint8_t *)malloc(OTA_READ_BUF);
+  if (!buf) {
+    Serial.println("【OTA】❌ malloc read buffer 失敗");
+    otaState = OTA_ERROR;
+    Update.abort();
+    http->end(); delete http; delete client;
+    return;
   }
 
-  uint8_t buf[1024];
-  int written = 0;
-  int lastReportedPct = -1;
+  int written      = 0;
+  int stallRetries = 0;        // 連續讀唔到嘅次數
+  int shortReads   = 0;        // 讀得少過要求嘅次數 (唔致命，只係統計)
+  int lastPct      = -1;
   unsigned long t0 = millis();
 
   while (written < total) {
-    int toRead = min((int)sizeof(buf), total - written);
-    int read = stream->readBytes(buf, toRead);
-    if (read <= 0) {
-      Serial.printf("【OTA】❌ read 提前 EOF 喺 %d/%d bytes (connected=%d, available=%d)\n",
-                    written, total, stream->connected(), stream->available());
-      otaState = OTA_ERROR;
-      Update.abort();
-      http->end(); delete http; delete client;
-      return;
-    }
-    if (Update.write(buf, read) != read) {
-      Serial.printf("【OTA】❌ Update.write() 失敗: %s\n", Update.errorString());
-      otaState = OTA_ERROR;
-      Update.abort();
-      http->end(); delete http; delete client;
-      return;
-    }
-    written += read;
+    size_t want = (size_t)(total - written);
+    if (want > OTA_READ_BUF) want = OTA_READ_BUF;
 
-    int pct = (written * 100) / total;
-    if (pct != lastReportedPct && pct % 10 == 0) {
-      lastReportedPct = pct;
-      unsigned long elapsed = millis() - t0;
-      Serial.printf("【OTA】%d%% (%d/%d bytes, %lu ms)\n", pct, written, total, elapsed);
-      otaProgress = pct;
+    int r = stream->read(buf, want);   // ✅ 直接用 raw read，唔用 readBytes 逐個 byte 拗
+
+    if (r > 0) {
+      stallRetries = 0;
+      if ((size_t)r < want) shortReads++;
+
+      if (Update.write(buf, r) != (size_t)r) {
+        Serial.printf("【OTA】❌ Update.write() 失敗: %s\n", Update.errorString());
+        otaState = OTA_ERROR;
+        Update.abort();
+        free(buf); http->end(); delete http; delete client;
+        return;
+      }
+      written += r;
+
+      int pct = (written * 100) / total;
+      if (pct != lastPct && pct % 10 == 0) {
+        lastPct = pct;
+        otaProgress = pct;
+        Serial.printf("【OTA】%d%% (%d/%d bytes, %lu ms, heap=%u)\n",
+                      pct, written, total, millis() - t0, ESP.getFreeHeap());
+      }
+      delay(1);   // feed watchdog + 讓 WiFi stack 有時間收包
+      continue;
     }
+
+    // r == 0：暫時冇 data — 唔係 EOF，等一等再試
+    stallRetries++;
+    if (stallRetries % 50 == 0) {   // 每 5 秒報一次，睇到係「慢」定係「死」
+      Serial.printf("【OTA】…等待 data (%d/%d, connected=%d, available=%d, 已等 %d 秒)\n",
+                    written, total, stream->connected(), stream->available(), stallRetries / 10);
+    }
+    if (stallRetries >= OTA_STALL_LIMIT) {
+      Serial.printf("【OTA】❌ 30 秒冇新 data 先當失敗 (written=%d/%d)\n", written, total);
+      Serial.printf("【OTA】   connected=%d available=%d heap=%u shortReads=%d\n",
+                    stream->connected(), stream->available(), ESP.getFreeHeap(), shortReads);
+      otaState = OTA_ERROR;
+      Update.abort();
+      free(buf); http->end(); delete http; delete client;
+      return;
+    }
+    delay(100);
+  }
+
+  free(buf);
+
+  if (written != total) {
+    Serial.printf("【OTA】❌ 下載唔完整: %d/%d\n", written, total);
+    otaState = OTA_ERROR;
+    Update.abort();
+    http->end(); delete http; delete client;
+    return;
   }
 
   Serial.println("【OTA】Update.end()...");
@@ -1822,28 +1950,20 @@ void performOTA(String binUrl) {
   delete client;
   otaProgress = 100;
   otaState = OTA_SUCCESS;
-  Serial.printf("【OTA】✓ flash 成功 (%lu ms), 1 秒後 reboot\n", millis() - t0);
+  Serial.printf("【OTA】✓ flash 成功 (%lu ms, shortReads=%d), 1 秒後 reboot\n",
+                millis() - t0, shortReads);
   Serial.println("========== OTA END ==========\n");
   delay(1000);
   ESP.restart();
 }
 
 // =====================================================
-// Touch 座標映射: raw XPT2046 (12-bit) → LCD pixels (rotation 1 = 320x240 landscape)
+// ⚠️ 已移除未使用嘅 mapTouchToLCD()
+//    原因: OTA page / 主畫面嘅 tap 偵測只用 touchIsPressed() 判斷「有冇撳」,
+//    完全唔用座標 (避免 CYD raw range 校準偏差)。如果日後要做「撳某個掣」,
+//    再按呢個 mapping 加返:
+//      x = map(rawX, 200, 3900, 0, 320);  y = map(rawY, 200, 3900, 0, 240);
 // =====================================================
-bool mapTouchToLCD(int rawX, int rawY, int* lcdX, int* lcdY) {
-  // CYD raw range typically: X 200-3900, Y 200-3900
-  // Rotation 1: width=320, height=240
-  // X 軸可能要 swap (視乎 CYD 版本)
-  int x = map(rawX, 200, 3900, 0, 320);
-  int y = map(rawY, 200, 3900, 0, 240);
-  // Clamp
-  if (x < 0) x = 0; if (x > 319) x = 319;
-  if (y < 0) y = 0; if (y > 239) y = 239;
-  *lcdX = x;
-  *lcdY = y;
-  return true;
-}
 
 // =====================================================
 // OTA UI Page — 顯示版本資訊 + 升級按鈕
@@ -1856,19 +1976,27 @@ void drawOTAPage() {
   // Title
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
   lcd.setCursor(10, 5);
-  lcd.println("🔄 OTA 線上更新");
+  // ⚠️ 唔好用 emoji / ✓✗⚙🔄 — efontTW_16 冇呢啲 glyph (只會顯示空白)
+  lcd.println("OTA 線上更新");
 
   lcd.drawFastHLine(0, 25, 320, TFT_DARKGREY);
 
   // 版本資訊
-  int y = 40;
+  // ⚠️ 「最新版本」同版本號一定要分兩行:
+  //    「最新版本: v1.0.5 ✓ 已是最新」實測約 21 個全形字 = 336px > 320px,
+  //    舊 code 一齊 print → 尾幾個字被推出畫面
+  int y = 36;
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setCursor(10, y);
   lcd.printf("目前版本: v%s", FIRMWARE_VERSION);
-  y += 22;
+  y += 20;
 
   lcd.setCursor(10, y);
-  lcd.print("最新版本: ");
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.print("最新版本:");
+  y += 20;
+
+  lcd.setCursor(10, y);
   switch (otaState) {
     case OTA_CHECKING:
       lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -1876,21 +2004,21 @@ void drawOTAPage() {
       break;
     case OTA_AVAILABLE:
       lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-      lcd.printf("v%s ✓ 有更新\n", otaLatestVersion.c_str());
+      lcd.printf("%s  有更新", otaLatestVersion.c_str());
       break;
     case OTA_UPTODATE:
       lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-      lcd.printf("v%s ✓ 已是最新\n", otaLatestVersion.c_str());
+      lcd.printf("%s  已是最新", otaLatestVersion.c_str());
       break;
     case OTA_FAILED:
       lcd.setTextColor(TFT_RED, TFT_BLACK);
-      lcd.println("✗ 檢查失敗");
+      lcd.println("X 檢查失敗");
       break;
     default:
       lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
       lcd.println("--");
   }
-  y += 22;
+  y += 20;
 
   // 狀態訊息
   lcd.setCursor(10, y);
@@ -1905,12 +2033,12 @@ void drawOTAPage() {
       break;
     case OTA_SUCCESS:
       lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-      lcd.println("✓ 升級成功！重新啟動中...");
+      lcd.println("升級成功！重新啟動中...");
       y += 22;
       break;
     case OTA_ERROR:
       lcd.setTextColor(TFT_RED, TFT_BLACK);
-      lcd.println("✗ 升級失敗，請重試");
+      lcd.println("X 升級失敗，請重試");
       y += 22;
       break;
     default:
@@ -2426,8 +2554,11 @@ void loop() {
   }
 
   // 時間更新 (每 10 秒)
+  // ⚠️ 清 190..265 而唔係 190..320: 265..320 係頁數指示器 "[1/3]",
+  //    舊 code 清足 130px 闊, 每 10 秒就會抹走頁數 (重疊/殘影 bug)
   if (currentMillis - lastClockUpdate >= 10000) {
-    lcd.fillRect(190, 22, 130, 18, TFT_BLACK);  // 清除舊時間殘影
+    int clearW = (totalPages > 1) ? 72 : 130;
+    lcd.fillRect(190, 22, clearW, 18, TFT_BLACK);  // 清除舊時間殘影
     lcd.setFont(&fonts::efontTW_16);
     lcd.setTextColor(TFT_GREEN, TFT_BLACK);
     lcd.setCursor(195, 24);

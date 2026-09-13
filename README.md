@@ -55,23 +55,57 @@ Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
 
 ## OTA Updates
 
-1. Build firmware in Arduino IDE
-2. Export compiled binary: **Sketch → Export Compiled Binary** → produces `.ino.bin`
-3. Rename to `kmb-eta-display.bin`
-4. Create a [GitHub Release](https://github.com/Anthony114hk/mini-eta-helper/releases/new):
-   - Tag: `v1.0.0`, `v1.0.1`, ...
+1. Bump `FIRMWARE_VERSION` in `kmb-eta-display.ino` (e.g. `1.0.6` → `1.0.7`) — the OTA check compares this string against the GitHub release `tag_name`
+2. Build firmware in Arduino IDE
+3. Export compiled binary: **Sketch → Export Compiled Binary** → produces `.ino.bin`
+4. Rename to `kmb-eta-display.bin`
+5. Create a [GitHub Release](https://github.com/Anthony114hk/mini-eta-helper/releases/new):
+   - Tag: `v1.0.0`, `v1.0.1`, ... (一定要同 `FIRMWARE_VERSION` 完全一樣)
    - Attach `kmb-eta-display.bin`
    - Publish
-5. On ESP32: **hold GPIO 0 button for 10+ seconds** → OTA page appears
-6. Page shows current vs latest version + an "立即升級" button
-7. Short-press GPIO 0 button to upgrade (or hold 1.5s+ to cancel) → device downloads, flashes, and reboots
+6. On ESP32: **hold GPIO 0 button for 3+ seconds** → OTA page appears
+7. Page shows current vs latest version + an "立即升級" button
+8. Short-press GPIO 0 button (or tap the screen) to upgrade → device downloads, flashes, and reboots
+
+> ⚠️ **`glyph_overlays.h` 一定要同 `kmb-eta-display.ino` 放埋一齊** (Arduino IDE 靠相對路徑 `#include`),否則編譯會 fail。
+>
+> ⚠️ **Tag 同 `FIRMWARE_VERSION` 必須一致** — `checkLatestRelease()` 係直接比較 `tag_name` 同 `FIRMWARE_VERSION` 兩個字串,唔會做 version parsing。
+
+### Publishing checklist
+
+```bash
+# 1) 確認版本號兩個地方一致
+grep FIRMWARE_VERSION kmb-eta-display.ino      # 例如 "1.0.7"
+# 2) commit + push 源碼
+git add kmb-eta-display.ino glyph_overlays.h README.md
+git commit -m "v1.0.7: <改咗咩>"
+git push origin main
+# 3) 用 Arduino IDE Export Compiled Binary → 改名 kmb-eta-display.bin
+# 4) 去 GitHub Releases 開 tag v1.0.7 + attach 個 .bin
+```
 
 ### Changelog
+
+**v1.0.6** — Fix OTA early-EOF + Chinese glyph coverage (邨/鰂/脷 were missing)
+- **OTA `read 提前 EOF` 真正原因**: `Stream::readBytes()` 會逐個 byte 呼叫 `read()`,而 `NetworkClientSecure::read()` 係「buffer 冇 data 就即刻 return -1」嘅語意。舊 code 只要 `read <= 0` 就 `Update.abort()`,一次都唔重試 → 表面睇落好似「下載斷咗」,其實係自己 abort 咗
+- Fix: 對齊官方 `Update.writeStream()` 策略 — `read <= 0` 唔再即死,100ms 後重試,最多 30 秒冇新 data 才放棄;改用 raw `stream->read()` + 2KB heap buffer;完工核對 `written == Content-Length`;每次進度報告加 `heap=`,失敗 dump `connected/available/heap/shortReads`
+- 加 app partition size 前置檢查 (1,961,984 bytes) — image 過大時即刻講清楚,唔會等到 `Update.begin()` 神秘 fail
+- **中文字亂碼根因**: 用程式解析 `efontTW_16` 字型表,對比全量 KMB 資料 (6,741 站名 + 1,600 路線紀錄) → 站名字集 1,118 個字缺 17 個,目的地字集 454 個字缺 5 個。**實際會出現嘅只有 5 個:邨(322 條路線!)、埗、·、鰂、脷**
+- 新增 `glyph_overlays.h`: 由 MingLiU_HKSCS 渲染嘅 16×16 bitmap overlay,一次補齊 5 個字 (取代舊版只補「埗」一個),並修正 bitmap 垂直對齊 (舊版冇計 u8g2 `y_offset = -2`,「深水埗」個埗會高 2px)
+- `drawStringWithBu()` 改為通用字型查表;新增 `textWidthWithBu()` — 舊版跑馬燈用 `lcd.textWidth()` 量度,唔知 bitmap 存在會少算 16px → 兩份 copy 疊埋
+- **排版重疊修正**: 時間每 10 秒重繪時會抹走頁數指示器 `[1/3]`;長站名會壓住時鐘 (加 185px 截字);OTA「最新版本」一行約 336px 爆出 320px 畫面 (拆兩行)
+- **LCD 上移除 emoji / ✓✗⚙🔄** — `efontTW_16` 冇呢啲 glyph,只會顯示空白
+- **`setTextSize(2)` 全部移除** — efontTW_16 本身係 16px 點陣字,開 2× 變 32×32,`ESP32_Smart_Clock` 會變 512px 爆畫面;`setFont()` 係唔會重置 text size 嘅
+- 同路線重複開行修正 (API `dest_tc` 一變就開新行,會撐爆 40 行上限)
+- 死碼清理: 移除 `fixHongKongWords()` (no-op)、`mapTouchToLCD()`、`LONG_PRESS_MS`、`OTA_UPDATE_MAGIC`、`otaTouchDown`;`runTouchPinScan()` / `touchGetPoint()` 改用 `#if` 開關包住
+- 新增 `DEBUG_DRAW_TEXT` 開關: 開 1 就會 log 每次畫嘅字串 + 闊度,並自動標出邊個字冇字形
+- Firmware size: 1,860,643 bytes (94%)
 
 **v1.0.5** — Remove touch debug log
 - `touchIsPressed()` 每秒 print `【Touch】Z1=0 (a=0 b=0 c=0)` 嘅 debug log 已移除 (之前診斷 touch chip 時加)
 
 **v1.0.4** — Fix read-after-redirect EOF (v1.0.3 redirect worked but stream immediately EOF)
+> ⚠️ 呢個版本嘅診斷 (「SSL state 污染」) 後來證明係**錯嘅方向** — v1.0.6 先搵到真正原因 (readBytes 短讀 + 唔重試)。redirect 處理本身冇問題,保留。
 - v1.0.3 manually followed GitHub 302 → 200 successfully, but `stream->readBytes()` returned 0 immediately (read 0/1860112 bytes)
 - Root cause: reusing WiFiClientSecure across redirects polluted SSL state — server may have closed the connection after sending headers
 - Fix: each redirect iteration uses a **brand new** `WiFiClientSecure` + `HTTPClient` (heap-allocated, deleted on next iteration)
