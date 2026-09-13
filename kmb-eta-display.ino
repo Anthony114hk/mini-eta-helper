@@ -454,7 +454,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.2"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.3"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -1673,12 +1673,10 @@ void checkLatestRelease() {
 
 // =====================================================
 // OTA: 下載 .bin + flash (blocking，畫面會 freeze 直至完成)
-// ✅ v1.0.2 fix:
-//   - 增加詳細 Serial logging 顯示 download URL / redirect target / 每 10% 進度
-//   - 用 http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS) 確保 GitHub 302 redirect 跟到
-//   - 加 http.setReuse(true) 避免 keep-alive socket 影響 SSL state
-//   - timeout 由 30s 加到 60s (1.86MB 經弱 WiFi 可能慢)
-//   - 將原本「size 異常」嘅 silent return 改為 print 實際 size，方便 debug
+// ✅ v1.0.3 fix:
+//   - ESP32 HTTPClient 跟唔到 GitHub release 嘅 302 redirect (header Location 喺 SSL socket
+//     buffer 唔穩)。改用手動 follow redirect：拎到 302 + Location 後 close + re-GET 新 URL
+//   - 仍然有詳細 Serial logging
 // =====================================================
 void performOTA(String binUrl) {
   otaState = OTA_DOWNLOADING;
@@ -1689,12 +1687,12 @@ void performOTA(String binUrl) {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(60000);  // 60s — 大 firmware 經弱 WiFi 可能慢
+  client.setTimeout(60000);
 
   HTTPClient http;
-  http.setTimeout(60000);    // 60s
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // 確保 302 redirect 跟到
-  http.setRedirectLimit(10);  // 預設 10, 顯式 set 確保跟到 GitHub -> release-assets 嘅 redirect
+  http.setTimeout(60000);
+  // ❌ ESP32 HTTPClient 唔識自動跟 GitHub release 嘅 302 (即使 setFollowRedirects 都失效)
+  //    手動處理: 攞到 302 後拎 Location header，重新 begin + GET
 
   if (!http.begin(client, binUrl)) {
     otaState = OTA_ERROR;
@@ -1705,8 +1703,33 @@ void performOTA(String binUrl) {
   Serial.println("【OTA】GET 開始...");
   int code = http.GET();
   Serial.printf("【OTA】HTTP code: %d\n", code);
+
+  // ✅ 手動跟 redirect (最多 3 次，雖然 GitHub 通常只 1 跳)
+  int redirectCount = 0;
+  while ((code == HTTP_CODE_MOVED_PERMANENTLY || code == HTTP_CODE_FOUND || code == HTTP_CODE_TEMPORARY_REDIRECT)
+         && redirectCount < 3) {
+    String newLoc = http.getLocation();
+    Serial.printf("【OTA】↪ 302 redirect → %s\n", newLoc.c_str());
+    http.end();
+
+    if (newLoc.length() == 0) {
+      Serial.println("【OTA】❌ redirect 但 Location header 空白");
+      otaState = OTA_ERROR;
+      return;
+    }
+
+    if (!http.begin(client, newLoc)) {
+      otaState = OTA_ERROR;
+      Serial.println("【OTA】❌ http.begin(newLoc) 失敗");
+      return;
+    }
+    redirectCount++;
+    code = http.GET();
+    Serial.printf("【OTA】HTTP code (after redirect #%d): %d\n", redirectCount, code);
+  }
+
   if (code != HTTP_CODE_OK) {
-    Serial.printf("【OTA】❌ HTTP code 非 200, 係 %d (URL: %s)\n", code, http.getLocation().c_str());
+    Serial.printf("【OTA】❌ HTTP code 非 200, 係 %d\n", code);
     otaState = OTA_ERROR;
     http.end();
     return;
@@ -1719,12 +1742,6 @@ void performOTA(String binUrl) {
     otaState = OTA_ERROR;
     http.end();
     return;
-  }
-
-  // ✅ ESP32 partition 'min_spiffs': app0/app1 各 1,966,080 bytes (1.875 MB)
-  //    實際可用 = partition size - bootloader header (~32 bytes)
-  if (total > 1900000) {
-    Serial.printf("【OTA】⚠ size %d 接近 partition limit 1966080 — 確保 export 嘅係 v1.0.1 binary!\n", total);
   }
 
   Serial.println("【OTA】Update.begin()...");
