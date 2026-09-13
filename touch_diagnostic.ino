@@ -56,8 +56,11 @@ const PinCombo SPI_COMBOS[] = {
   {"S10: CLK=0 MOSI=2 MISO=15 CS=33",     0,  2, 15, 33},
   {"S11: CLK=15 MOSI=13 MISO=12 CS=33",  15, 13, 12, 33},
   {"S12: CLK=14 MOSI=2 MISO=12 CS=33",   14,  2, 12, 33},
+  // S13: 確診 working pinout — 底版 silkscreen 寫 TP CLK=IO25, CS=IO33, DIN=IO32, OUT=IO39
+  // 呢個 combo 喺 touch_test.ino 上 confirm work (2026-09-13)
+  {"S13: CLK=25 MOSI=32 MISO=39 CS=33 [CONFIRMED]",   25, 32, 39, 33},
 };
-const int NUM_SPI = 12;
+const int NUM_SPI = 13;
 
 struct I2CCombo {
   const char* name;
