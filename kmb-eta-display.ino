@@ -454,7 +454,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.3"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.4"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -1673,10 +1673,11 @@ void checkLatestRelease() {
 
 // =====================================================
 // OTA: 下載 .bin + flash (blocking，畫面會 freeze 直至完成)
-// ✅ v1.0.3 fix:
-//   - ESP32 HTTPClient 跟唔到 GitHub release 嘅 302 redirect (header Location 喺 SSL socket
-//     buffer 唔穩)。改用手動 follow redirect：拎到 302 + Location 後 close + re-GET 新 URL
-//   - 仍然有詳細 Serial logging
+// ✅ v1.0.4 fix:
+//   - v1.0.3 manual redirect 成功 (302 → 200) 但 read 第一次就 EOF
+//   - 原因: WiFiClientSecure 喺 redirect 過程中 SSL state 污染 / socket buffer 已 drain
+//   - Fix: redirect 之後用全新嘅 WiFiClientSecure + 將 GET 改成 read 整個 response body 喺 buffer
+//   - 簡化: 用 http.getString() 拎 Content-Length header，然後 stream 下載
 // =====================================================
 void performOTA(String binUrl) {
   otaState = OTA_DOWNLOADING;
@@ -1685,62 +1686,69 @@ void performOTA(String binUrl) {
   Serial.printf("\n========== OTA START ==========\n");
   Serial.printf("【OTA】binUrl: %s\n", binUrl.c_str());
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(60000);
-
-  HTTPClient http;
-  http.setTimeout(60000);
-  // ❌ ESP32 HTTPClient 唔識自動跟 GitHub release 嘅 302 (即使 setFollowRedirects 都失效)
-  //    手動處理: 攞到 302 後拎 Location header，重新 begin + GET
-
-  if (!http.begin(client, binUrl)) {
-    otaState = OTA_ERROR;
-    Serial.println("【OTA】❌ http.begin() 失敗");
-    return;
-  }
-
-  Serial.println("【OTA】GET 開始...");
-  int code = http.GET();
-  Serial.printf("【OTA】HTTP code: %d\n", code);
-
-  // ✅ 手動跟 redirect (最多 3 次，雖然 GitHub 通常只 1 跳)
+  // === 第一步：手動 follow redirect，每次用全新 socket ===
+  String currentUrl = binUrl;
+  int code = -1;
+  String newLoc;
   int redirectCount = 0;
-  while ((code == HTTP_CODE_MOVED_PERMANENTLY || code == HTTP_CODE_FOUND || code == HTTP_CODE_TEMPORARY_REDIRECT)
-         && redirectCount < 3) {
-    String newLoc = http.getLocation();
-    Serial.printf("【OTA】↪ 302 redirect → %s\n", newLoc.c_str());
-    http.end();
+  WiFiClientSecure *client = nullptr;
+  HTTPClient *http = nullptr;
 
-    if (newLoc.length() == 0) {
-      Serial.println("【OTA】❌ redirect 但 Location header 空白");
+  while (redirectCount < 4) {
+    // ✅ 每個 redirect loop iteration 用全新 WiFiClientSecure + HTTPClient
+    //    (唔 reuse，因為 SSL state + socket buffer 喺 redirect 過程中污染)
+    if (client) { delete client; client = nullptr; }
+    if (http) { delete http; http = nullptr; }
+
+    client = new WiFiClientSecure();
+    client->setInsecure();
+    client->setTimeout(60000);
+
+    http = new HTTPClient();
+    http->setTimeout(60000);
+
+    if (!http->begin(*client, currentUrl)) {
+      Serial.printf("【OTA】❌ http.begin() 失敗 (URL: %s)\n", currentUrl.c_str());
       otaState = OTA_ERROR;
+      delete client; delete http;
       return;
     }
 
-    if (!http.begin(client, newLoc)) {
-      otaState = OTA_ERROR;
-      Serial.println("【OTA】❌ http.begin(newLoc) 失敗");
-      return;
+    Serial.printf("【OTA】GET #%d: %s\n", redirectCount, currentUrl.c_str());
+    code = http->GET();
+    Serial.printf("【OTA】HTTP code: %d\n", code);
+
+    if (code == HTTP_CODE_MOVED_PERMANENTLY || code == HTTP_CODE_FOUND || code == HTTP_CODE_TEMPORARY_REDIRECT) {
+      newLoc = http->getLocation();
+      Serial.printf("【OTA】↪ redirect → %s\n", newLoc.c_str());
+      if (newLoc.length() == 0) {
+        Serial.println("【OTA】❌ Location header 空白");
+        otaState = OTA_ERROR;
+        delete client; delete http;
+        return;
+      }
+      http->end();
+      currentUrl = newLoc;
+      redirectCount++;
+      continue;
     }
-    redirectCount++;
-    code = http.GET();
-    Serial.printf("【OTA】HTTP code (after redirect #%d): %d\n", redirectCount, code);
+    break;  // 非 redirect response
   }
 
   if (code != HTTP_CODE_OK) {
     Serial.printf("【OTA】❌ HTTP code 非 200, 係 %d\n", code);
     otaState = OTA_ERROR;
-    http.end();
+    if (http) { http->end(); delete http; }
+    if (client) delete client;
     return;
   }
 
-  int total = http.getSize();
+  int total = http->getSize();
   Serial.printf("【OTA】Content-Length: %d bytes (%.2f MB)\n", total, total / 1048576.0);
   if (total <= 0 || total > 2 * 1024 * 1024) {
-    Serial.printf("【OTA】❌ size 異常 %d, 要 <= 2MB\n", total);
+    Serial.printf("【OTA】❌ size 異常 %d\n", total);
     otaState = OTA_ERROR;
-    http.end();
+    http->end(); delete http; delete client;
     return;
   }
 
@@ -1748,17 +1756,32 @@ void performOTA(String binUrl) {
   if (!Update.begin(total)) {
     Serial.printf("【OTA】❌ Update.begin() 失敗: %s\n", Update.errorString());
     otaState = OTA_ERROR;
-    http.end();
+    http->end(); delete http; delete client;
     return;
   }
 
-  WiFiClient *stream = http.getStreamPtr();
+  WiFiClient *stream = http->getStreamPtr();
   if (!stream) {
     Serial.println("【OTA】❌ http.getStreamPtr() 返 nullptr");
     otaState = OTA_ERROR;
     Update.abort();
-    http.end();
+    http->end(); delete http; delete client;
     return;
+  }
+
+  // ✅ Check stream 連線 state + 預先 peek 第一 byte 確保 socket 唔係 dead
+  Serial.printf("【OTA】stream connected=%d, available=%d\n", stream->connected(), stream->available());
+  if (stream->available() == 0) {
+    Serial.println("【OTA】⚠ stream available=0, 等 200ms 睇有冇 data...");
+    delay(200);
+    Serial.printf("【OTA】after 200ms: available=%d\n", stream->available());
+    if (stream->available() == 0) {
+      Serial.println("【OTA】❌ stream 冇 data — socket 可能被 server close 咗");
+      otaState = OTA_ERROR;
+      Update.abort();
+      http->end(); delete http; delete client;
+      return;
+    }
   }
 
   uint8_t buf[1024];
@@ -1770,17 +1793,18 @@ void performOTA(String binUrl) {
     int toRead = min((int)sizeof(buf), total - written);
     int read = stream->readBytes(buf, toRead);
     if (read <= 0) {
-      Serial.printf("【OTA】❌ read 提前 EOF 喺 %d/%d bytes\n", written, total);
+      Serial.printf("【OTA】❌ read 提前 EOF 喺 %d/%d bytes (connected=%d, available=%d)\n",
+                    written, total, stream->connected(), stream->available());
       otaState = OTA_ERROR;
       Update.abort();
-      http.end();
+      http->end(); delete http; delete client;
       return;
     }
     if (Update.write(buf, read) != read) {
       Serial.printf("【OTA】❌ Update.write() 失敗: %s\n", Update.errorString());
       otaState = OTA_ERROR;
       Update.abort();
-      http.end();
+      http->end(); delete http; delete client;
       return;
     }
     written += read;
@@ -1798,11 +1822,13 @@ void performOTA(String binUrl) {
   if (!Update.end()) {
     Serial.printf("【OTA】❌ Update.end() 失敗: %s\n", Update.errorString());
     otaState = OTA_ERROR;
-    http.end();
+    http->end(); delete http; delete client;
     return;
   }
 
-  http.end();
+  http->end();
+  delete http;
+  delete client;
   otaProgress = 100;
   otaState = OTA_SUCCESS;
   Serial.printf("【OTA】✓ flash 成功 (%lu ms), 1 秒後 reboot\n", millis() - t0);

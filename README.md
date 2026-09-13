@@ -68,10 +68,18 @@ Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
 
 ### Changelog
 
-**v1.0.3** — Manual redirect follow for GitHub release
+**v1.0.4** — Fix read-after-redirect EOF (v1.0.3 redirect worked but stream immediately EOF)
+- v1.0.3 manually followed GitHub 302 → 200 successfully, but `stream->readBytes()` returned 0 immediately (read 0/1860112 bytes)
+- Root cause: reusing WiFiClientSecure across redirects polluted SSL state — server may have closed the connection after sending headers
+- Fix: each redirect iteration uses a **brand new** `WiFiClientSecure` + `HTTPClient` (heap-allocated, deleted on next iteration)
+- Added `stream->available()` check with 200ms wait before first read, to detect dead sockets early
+- Added `stream->connected()` in EOF error message for debugging
+
+**v1.0.3** — Manual redirect follow for GitHub release (failed: stream EOF after redirect)
 - ESP32 HTTPClient auto-redirect failed for GitHub release 302 (Location header lost in SSL buffer)
 - `performOTA()` now manually follows up to 3 redirects: reads `Location` header on 302, closes socket, re-`begin()` + `GET()` on new URL
-- Will properly follow `github.com → release-assets.githubusercontent.com` redirect chain
+- Successfully followed `github.com → release-assets.githubusercontent.com` redirect chain (confirmed in Serial Monitor)
+- However: stream immediately EOF'd at 0 bytes read — see v1.0.4 fix
 
 **v1.0.2** — OTA download logging + redirect fix (failed: ESP32 HTTPClient didn't follow redirect)
 - `performOTA()`: detailed Serial logging (URL / HTTP code / size / progress + timing)
