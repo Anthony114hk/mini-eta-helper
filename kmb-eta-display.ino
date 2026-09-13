@@ -502,7 +502,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.6"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.7"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -531,12 +531,13 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 #define FC_M1_X            240  // minute ones (ends at 310, right margin 10)
 
 // Button state machine
+//   ⚠️ v1.0.6 重設計: 移除「短撳 toggle flip clock」 (冇人用)
 #define BTN_DEBOUNCE_MS    30
 #define DOUBLE_TAP_MS      3000
-#define SHORT_PRESS_MAX    2000
-#define LONG_PRESS_RESET   3000
-#define LONG_PRESS_OTA     3000
-#define BTN_HOLD_TIMEOUT   5000
+// 長撳 GPIO 0 OTA page 嘅時間 (撳住 20 秒 → 跳 OTA check)
+#define LONG_PRESS_OTA     20000
+// safety: 撳住 > 20 秒都即時觸發, 唔等放開
+#define BTN_HOLD_TIMEOUT   20000
 
 // OTA state
 enum OtaState {
@@ -2148,12 +2149,16 @@ void handleOTAPageTouch() {
 }
 
 // =====================================================
-// GPIO 0 button state machine (主畫面時用)
-//   單撳 (< 2s, 3 秒內冇 follow-up)  → toggleFlipClock()
-//   雙撳 (3 秒內撳 2 下)             → enterConfigMode(true)
-//   長撳 2-3s                        → reset WiFi + reboot
-//   長撳 3+s                         → OTA check
-//   safety: held > 5s                → OTA check (force)
+// GPIO 0 button state machine (主畫面時用, v1.0.7)
+//
+//   撳一下 (< 3s, 放開)              → 無視
+//   撳兩下 (3s 內撳 2 下)             → enterConfigMode(true)
+//   撳住 3-20s (放開)                → 觸發 OTA check
+//   撳住 > 20s (唔放, 死撳)          → reset WiFi + reboot
+//
+// ⚠️ 短撳 toggle flip clock 已移除
+// ⚠️ 中間撳 3-20s 唔會清 WiFi — 真係要清要死撳 20 秒以上
+//    (防止唔小心撳耐咗, 唔見晒 WiFi 設定要重新配)
 // =====================================================
 void pollGPIO0Button() {
   bool pressed = (digitalRead(0) == LOW);
@@ -2175,27 +2180,21 @@ void pollGPIO0Button() {
         unsigned long held = millis() - btnPressStart;
         btnReleaseTime = millis();
 
-        if (held < SHORT_PRESS_MAX) {
+        if (held < DOUBLE_TAP_MS) {
           // 短撳 → 等 double-tap window
           btnState = BTN_WAIT_DOUBLE_TAP;
-        } else if (held < LONG_PRESS_RESET) {
-          // 2-3s long press — reset WiFi
-          Serial.println("【Reset】GPIO 0 長撳 2 秒，reset WiFi + reboot");
-          WiFiManager wm;
-          wm.resetSettings();
-          ESP.restart();
         } else {
-          // 3+s long press — OTA check
-          Serial.println("【OTA】GPIO 0 長撳 3 秒，觸發 OTA check");
+          // 撳住 3-20s (放開) → OTA check
+          Serial.println("【OTA】GPIO 0 長撳 3-20 秒 (放開), 觸發 OTA check");
           triggerOTACheck();
           btnState = BTN_IDLE;
         }
       } else if (millis() - btnPressStart > BTN_HOLD_TIMEOUT) {
-        // safety: held > 5s — force OTA
-        Serial.println("【OTA】GPIO 0 撳住 > 5 秒，強制 OTA check");
-        triggerOTACheck();
-        while (digitalRead(0) == LOW) delay(10);  // wait for release
-        btnState = BTN_IDLE;
+        // safety: 撳住 > 20s 仲未放 → reset WiFi + reboot
+        Serial.println("【Reset】GPIO 0 撳住 > 20 秒 (唔放), reset WiFi + reboot");
+        WiFiManager wm;
+        wm.resetSettings();
+        ESP.restart();
       }
       break;
     }
@@ -2205,19 +2204,15 @@ void pollGPIO0Button() {
         delay(BTN_DEBOUNCE_MS);
         if (digitalRead(0) == LOW) {
           // confirmed double-tap!
-          Serial.println("【設定】GPIO 0 雙撳，入設定模式");
-          // If in flip clock mode, exit first
-          if (flipClockMode) {
-            flipClockMode = false;
-          }
+          Serial.println("【設定】GPIO 0 雙撳, 入設定模式");
           enterConfigMode(true);
           while (digitalRead(0) == LOW) delay(10);  // wait for release
           btnState = BTN_IDLE;
         }
       } else if (millis() - btnReleaseTime > DOUBLE_TAP_MS) {
-        // double-tap window expired → single tap = toggle flip clock
-        Serial.println("【FlipClock】GPIO 0 單撳，toggle flip clock");
-        toggleFlipClock();
+        // double-tap window expired (只撳咗一下) → 原本係短撳, 而家當 double-tap 失敗
+        // v1.0.6 移除 flip clock, 呢個 case 變成 no-op
+        Serial.println("【Info】GPIO 0 單撳, 已 ignore (v1.0.6 移除 flip clock 切換)");
         btnState = BTN_IDLE;
       }
       break;
@@ -2226,36 +2221,20 @@ void pollGPIO0Button() {
 }
 
 // =====================================================
-// Touch tap detection (anywhere on screen)
-//   撳一下 → toggle flip clock (bus data ↔ clock)
-//   用 press/release 邊沿偵測，debounce 300ms
+// Touch tap detection — v1.0.6 已停用 (flip clock 切換搬走)
+//
+// ⚠️ 保留呢個 function 但內部變 no-op, 避免 loop() 改動
+//    如果日後想加 tap 功能 (例如撳兩下 LCD 入設定), 改呢度就得
 // =====================================================
 void checkTouchTap() {
-  static bool wasPressed = false;
-  static unsigned long lastTapMs = 0;
-  const unsigned long TAP_DEBOUNCE = 300;
-
-  bool pressed = touchIsPressed();
-
-  if (pressed && !wasPressed) {
-    // Press down edge
-    wasPressed = true;
-  } else if (!pressed && wasPressed) {
-    // Release edge — register tap
-    wasPressed = false;
-    if (millis() - lastTapMs > TAP_DEBOUNCE) {
-      lastTapMs = millis();
-      Serial.println("【Touch】撳一下，toggle flip clock");
-      toggleFlipClock();
-    }
-  }
+  // intentionally empty — v1.0.6 取消 tap toggle flip clock
 }
 
 // =====================================================
-// 觸發 OTA check + 顯示 OTA page (由 GPIO 0 長撳 3秒 觸發)
+// 觸發 OTA check + 顯示 OTA page (由 GPIO 0 長撳 20秒 觸發)
 // =====================================================
 void triggerOTACheck() {
-  Serial.println("【OTA】GPIO 0 長撳 3 秒，開始 check GitHub release");
+  Serial.println("【OTA】GPIO 0 長撳 20 秒, 開始 check GitHub release");
   otaState = OTA_CHECKING;
   drawOTAPage();
   checkLatestRelease();
