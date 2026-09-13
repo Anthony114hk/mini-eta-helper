@@ -46,9 +46,10 @@ LGFX_CYD lcd;
 
 // =====================================================
 // XPT2046 Touch Driver — software bit-bang SPI
-// (Same as kmb-eta-display.ino)
+// Mirrors kmb-eta-display.ino with pin correction:
+//   TP CLK: 26 → 25 (per board silkscreen label)
 // =====================================================
-#define T_CLK 26
+#define T_CLK 25
 #define T_MOSI 32
 #define T_MISO 39
 #define T_CS 33
