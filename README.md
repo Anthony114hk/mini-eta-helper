@@ -28,7 +28,7 @@ Hong Kong KMB bus real-time arrival display for the **ESP32 CYD** (Cheap Yellow 
 | LCD DC | 2 |
 | LCD RST | 4 |
 | Touch CS | 33 |
-| Touch CLK | 26 |
+| Touch CLK | 25 |
 | Touch DIN | 32 |
 | Touch DO | 39 |
 | Touch IRQ | 36 |
@@ -82,9 +82,9 @@ The test renders a 4×4 grid of zones. Each tap:
 
 If no touch registers within 5 seconds, a red "TOUCH NOT RESPONDING" banner appears and Serial logs the warning every 5 s. This confirms the chip is dead or the pinout is wrong.
 
-For a deeper sweep across known chip types and pin combinations, flash `touch_diagnostic.ino` instead — it scans 12 XPT2046 pin sets × bit-bang + HSPI × 6 commands plus 9 FT6336/FT6206 + 2 GT911 I²C combos (≈165 combinations total). Hold a finger on the screen for the full ~60 s scan.
+For a deeper sweep across known chip types and pin combinations, flash `touch_diagnostic.ino` instead — it scans 13 XPT2046 pin sets × bit-bang + HSPI × 6 commands plus 9 FT6336/FT6206 + 2 GT911 I²C combos (≈177 combinations total). Hold a finger on the screen for the full ~60 s scan.
 
-> **Note for this CYD:** the touch controller has been scan-confirmed dead — `touch_diagnostic.ino` reported `❌` across all 165 combinations on 2026-09-12. The firmware above is retained as a reusable diagnostic for other CYDs; this specific board relies on the GPIO 0 button for user input.
+> **This CYD's touch chip is alive** — the earlier "scan-confirmed dead" diagnosis (2026-09-12) was a false negative caused by a pin mismatch: the board silkscreen shows TP CLK wired to GPIO 25, but `T_CLK` was defined as 26. None of the original S1–S12 pin combos in the diagnostic tested CLK=25 + MOSI=32 + CS=33 (the correct combo). Fixed 2026-09-13: `T_CLK=25` is now the working pinout. Diagnostic now includes S13 covering this combo for future reference.
 
 ## License
 
