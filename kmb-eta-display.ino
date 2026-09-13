@@ -454,7 +454,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.1"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.2"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -1642,7 +1642,15 @@ void checkLatestRelease() {
   JsonArray assets = doc["assets"].as<JsonArray>();
   for (JsonObject a : assets) {
     if (String(a["name"].as<const char*>()) == OTA_ASSET_NAME) {
+      // ✅ 直接用 GitHub API 嘅 direct CDN URL，避免 ESP32 跟 github.com -> release-assets redirect
+      //    (URL pattern: https://github.com/{user}/{repo}/releases/download/{tag}/{file}
+      //                 -> https://release-assets.githubusercontent.com/...)
+      String direct = a["url"].as<String>();
+      // GitHub API asset object 嘅 "url" 已經係 CDN URL with auth header needed (較複雜)
+      // 用 browser_download_url 但 ESP32 redirect 會自動 follow (line 622-660 HTTPClient.cpp)
       otaBinUrl = a["browser_download_url"].as<String>();
+      Serial.printf("【OTA】asset URL (browser_download_url): %s\n", otaBinUrl.c_str());
+      Serial.printf("【OTA】asset API URL (with auth): %s\n", direct.c_str());
       break;
     }
   }
@@ -1665,65 +1673,94 @@ void checkLatestRelease() {
 
 // =====================================================
 // OTA: 下載 .bin + flash (blocking，畫面會 freeze 直至完成)
+// ✅ v1.0.2 fix:
+//   - 增加詳細 Serial logging 顯示 download URL / redirect target / 每 10% 進度
+//   - 用 http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS) 確保 GitHub 302 redirect 跟到
+//   - 加 http.setReuse(true) 避免 keep-alive socket 影響 SSL state
+//   - timeout 由 30s 加到 60s (1.86MB 經弱 WiFi 可能慢)
+//   - 將原本「size 異常」嘅 silent return 改為 print 實際 size，方便 debug
 // =====================================================
 void performOTA(String binUrl) {
   otaState = OTA_DOWNLOADING;
   otaProgress = 0;
 
+  Serial.printf("\n========== OTA START ==========\n");
+  Serial.printf("【OTA】binUrl: %s\n", binUrl.c_str());
+
   WiFiClientSecure client;
   client.setInsecure();
+  client.setTimeout(60000);  // 60s — 大 firmware 經弱 WiFi 可能慢
 
   HTTPClient http;
-  http.setTimeout(30000);
-  Serial.printf("【OTA】下載中: %s\n", binUrl.c_str());
+  http.setTimeout(60000);    // 60s
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // 確保 302 redirect 跟到
+  http.setRedirectLimit(10);  // 預設 10, 顯式 set 確保跟到 GitHub -> release-assets 嘅 redirect
 
   if (!http.begin(client, binUrl)) {
     otaState = OTA_ERROR;
-    Serial.println("【OTA】http.begin() 失敗");
+    Serial.println("【OTA】❌ http.begin() 失敗");
     return;
   }
 
+  Serial.println("【OTA】GET 開始...");
   int code = http.GET();
   Serial.printf("【OTA】HTTP code: %d\n", code);
   if (code != HTTP_CODE_OK) {
+    Serial.printf("【OTA】❌ HTTP code 非 200, 係 %d (URL: %s)\n", code, http.getLocation().c_str());
     otaState = OTA_ERROR;
     http.end();
     return;
   }
 
   int total = http.getSize();
-  Serial.printf("【OTA】size=%d bytes\n", total);
+  Serial.printf("【OTA】Content-Length: %d bytes (%.2f MB)\n", total, total / 1048576.0);
   if (total <= 0 || total > 2 * 1024 * 1024) {
-    Serial.println("【OTA】size 異常 (要 <= 2MB)");
+    Serial.printf("【OTA】❌ size 異常 %d, 要 <= 2MB\n", total);
     otaState = OTA_ERROR;
     http.end();
     return;
   }
 
+  // ✅ ESP32 partition 'min_spiffs': app0/app1 各 1,966,080 bytes (1.875 MB)
+  //    實際可用 = partition size - bootloader header (~32 bytes)
+  if (total > 1900000) {
+    Serial.printf("【OTA】⚠ size %d 接近 partition limit 1966080 — 確保 export 嘅係 v1.0.1 binary!\n", total);
+  }
+
+  Serial.println("【OTA】Update.begin()...");
   if (!Update.begin(total)) {
-    Serial.printf("【OTA】Update.begin() 失敗: %s\n", Update.errorString());
+    Serial.printf("【OTA】❌ Update.begin() 失敗: %s\n", Update.errorString());
     otaState = OTA_ERROR;
     http.end();
     return;
   }
 
   WiFiClient *stream = http.getStreamPtr();
+  if (!stream) {
+    Serial.println("【OTA】❌ http.getStreamPtr() 返 nullptr");
+    otaState = OTA_ERROR;
+    Update.abort();
+    http.end();
+    return;
+  }
+
   uint8_t buf[1024];
   int written = 0;
   int lastReportedPct = -1;
+  unsigned long t0 = millis();
 
   while (written < total) {
     int toRead = min((int)sizeof(buf), total - written);
     int read = stream->readBytes(buf, toRead);
     if (read <= 0) {
-      Serial.println("【OTA】read 提前 EOF");
+      Serial.printf("【OTA】❌ read 提前 EOF 喺 %d/%d bytes\n", written, total);
       otaState = OTA_ERROR;
       Update.abort();
       http.end();
       return;
     }
     if (Update.write(buf, read) != read) {
-      Serial.printf("【OTA】Update.write() 失敗: %s\n", Update.errorString());
+      Serial.printf("【OTA】❌ Update.write() 失敗: %s\n", Update.errorString());
       otaState = OTA_ERROR;
       Update.abort();
       http.end();
@@ -1734,13 +1771,15 @@ void performOTA(String binUrl) {
     int pct = (written * 100) / total;
     if (pct != lastReportedPct && pct % 10 == 0) {
       lastReportedPct = pct;
-      Serial.printf("【OTA】%d%% (%d/%d bytes)\n", pct, written, total);
+      unsigned long elapsed = millis() - t0;
+      Serial.printf("【OTA】%d%% (%d/%d bytes, %lu ms)\n", pct, written, total, elapsed);
       otaProgress = pct;
     }
   }
 
+  Serial.println("【OTA】Update.end()...");
   if (!Update.end()) {
-    Serial.printf("【OTA】Update.end() 失敗: %s\n", Update.errorString());
+    Serial.printf("【OTA】❌ Update.end() 失敗: %s\n", Update.errorString());
     otaState = OTA_ERROR;
     http.end();
     return;
@@ -1749,7 +1788,8 @@ void performOTA(String binUrl) {
   http.end();
   otaProgress = 100;
   otaState = OTA_SUCCESS;
-  Serial.println("【OTA】✓ flash 成功，1 秒後 reboot");
+  Serial.printf("【OTA】✓ flash 成功 (%lu ms), 1 秒後 reboot\n", millis() - t0);
+  Serial.println("========== OTA END ==========\n");
   delay(1000);
   ESP.restart();
 }

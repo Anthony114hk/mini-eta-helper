@@ -68,6 +68,12 @@ Stop IDs are KMB format, e.g. `20080C0DBE40B5D2` (route+bound+stop+seq hash).
 
 ### Changelog
 
+**v1.0.2** — OTA download logging + redirect fix
+- `performOTA()`: 詳細 Serial logging (URL / HTTP code / size / 進度 + timing) → 下次 OTA 失敗可即時知道邊 step fail
+- 顯式 `http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS)` + `setRedirectLimit(10)` — 確保跟到 GitHub release 嘅 302 redirect 去 `release-assets.githubusercontent.com`
+- `client.setTimeout(60s)` + `http.setTimeout(60s)` — 1.86 MB firmware 經弱 WiFi 可能慢
+- 加 `http.getStreamPtr()` nullptr check，避免 silent fail
+
 **v1.0.1** — `埗` bitmap fix + 13M marquee overlap fix
 - Custom 16×16 `埗` (U+57D7) bitmap rendered via `lcd.drawBitmap` overlay for stop names containing 深水埗 (since `efontTW_16` lacks this character)
 - Switch `lcd.print` → `lcd.drawString` in `drawStringWithBu()` — eliminates text-wrap that caused 13M marquee to visually overlap two text copies
