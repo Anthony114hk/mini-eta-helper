@@ -86,6 +86,12 @@ git push origin main
 
 ### Changelog
 
+**v1.0.10** — Long-press fires WHILE pressing (not on release)
+- v1.0.9 嘅長撳 3 秒邏輯要 release 先觸發 → 用戶體驗差 (按住等幾秒乜都唔見到,要放開先跳)
+- v1.0.10 改為按住到 3 秒 mark 即時 toggle flip clock (唔需要放開手指)
+- 加 `longPressFired` static flag 防止 hold > 3 秒重覆觸發
+- Release handler 會跳過已經 fire 過嘅 press (避免 double-trigger)
+
 **v1.0.9** — Long-press 3s toggle flip clock (instead of short tap)
 - `checkTouchTap()` 行為改動:
   - **短撳 (< 3 秒)**: 展開 / 退出 row (維持 v1.0.8 行為)

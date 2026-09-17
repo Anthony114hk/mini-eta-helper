@@ -502,7 +502,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.9"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.10"                // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -2388,8 +2388,9 @@ void checkTouchTap() {
   static bool wasPressed = false;
   static unsigned long pressStartMs = 0;
   static unsigned long lastTapMs = 0;
+  static bool longPressFired = false;  // 防止按住 3 秒以上重覆觸發
   const unsigned long TAP_DEBOUNCE = 300;
-  const unsigned long LONG_PRESS_MS = 3000;  // ✅ v1.0.8: hold 3 秒 toggle flip clock
+  const unsigned long LONG_PRESS_MS = 3000;
 
   bool pressed = touchIsPressed();
 
@@ -2397,15 +2398,22 @@ void checkTouchTap() {
     // Press down edge — 記住開始時間
     wasPressed = true;
     pressStartMs = millis();
+    longPressFired = false;
+  } else if (pressed && wasPressed) {
+    // ✅ 仍然按住 → 檢查夠唔夠 3 秒,夠就即時 toggle (唔需要等放開)
+    if (!longPressFired && millis() - pressStartMs >= LONG_PRESS_MS) {
+      longPressFired = true;
+      Serial.println("【Touch】按住 3 秒 → toggle flip clock");
+      toggleFlipClock();
+    }
   } else if (!pressed && wasPressed) {
     // Release edge
     wasPressed = false;
     unsigned long held = millis() - pressStartMs;
 
-    // ✅ 長撳 3 秒先 → toggle flip clock (入 / 出)
-    if (held >= LONG_PRESS_MS) {
-      Serial.printf("【Touch】長撳 %lu ms → toggle flip clock\n", held);
-      toggleFlipClock();
+    // 如果長撳已經 trigger 過 → 放開唔再做嘢 (避免 release 重覆觸發)
+    if (longPressFired || held >= LONG_PRESS_MS) {
+      longPressFired = false;
       return;
     }
 
@@ -2671,11 +2679,11 @@ void loop() {
   pollGPIO0Button();
 
   // ==========================================
-  // Touch tap (v1.0.8):
+  // Touch tap (v1.0.10):
   //   短撳 (< 3 秒):
   //     - expanded route → tap「← 返回」button 退出
   //     - main page row tap → expanded that route
-  //   長撳 (≥ 3 秒): toggle flip clock (入 / 出)
+  //   按住 (≥ 3 秒, 唔放): 即時 toggle flip clock (入 / 出)
   // ==========================================
   checkTouchTap();
 
