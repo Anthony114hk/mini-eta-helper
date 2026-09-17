@@ -454,9 +454,9 @@ bool touchIsPressed() {
 }
 
 // =====================================================
-// ⚠️ 未使用: 讀 XPT2046 原始座標 (校準用)
-//    而家 tap 偵測只靠 touchIsPressed(), 唔需要座標 (避免 calibration 偏差)
-//    要校準嘅話把下面 0 改成 1, 再自己喺 loop 呼叫 touchGetPoint()
+// v1.0.11: 讀 XPT2046 座標 + calibration mapping → 屏幕 pixel
+//    回傳屏幕座標 (rotation=1 landscape: 320x240),唔係 raw ADC 值
+//    mapping: x = map(rawX, 200, 3900, 0, 320); y = map(rawY, 200, 3900, 0, 240);
 // =====================================================
 #define ENABLE_TOUCH_RAW_POINT 1   // ✅ v1.0.8: UI redesign 需要 row tap 座標
 
@@ -472,13 +472,16 @@ bool touchGetPoint(int* x, int* y) {
     sumX += touchReadRaw(XPT2046_CMD_X);
     sumY += touchReadRaw(XPT2046_CMD_Y);
   }
-  *x = sumX / 5;
-  *y = sumY / 5;
+  int rawX = sumX / 5;
+  int rawY = sumY / 5;
 
-  // ✅ Valid range check — XPT2046 未撳時 X/Y 通常接近 0 或 4095 (floating)
-  //    真實 touch 通常喺 200-3900 之間
-  bool valid = (*x > 200 && *x < 3900 && *y > 200 && *y < 3900);
-  Serial.printf("【Touch】X=%d Y=%d valid=%s\n", *x, *y, valid ? "YES" : "NO");
+  // ✅ v1.0.11: Calibration mapping (raw 200-3900 → screen 0-320/0-240)
+  //    如果 Y 軸方向反咗可以 swap map() 嘅 a/b
+  *x = map(rawX, 200, 3900, 0, 320);
+  *y = map(rawY, 200, 3900, 0, 240);
+
+  // Valid range check (屏幕 pixel)
+  bool valid = (*x >= 0 && *x < 320 && *y >= 0 && *y < 240);
   return valid;
 }
 #endif  // ENABLE_TOUCH_RAW_POINT
@@ -502,7 +505,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.10"                // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.11"                // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -2117,11 +2120,8 @@ void performOTA(String binUrl) {
 }
 
 // =====================================================
-// ⚠️ 已移除未使用嘅 mapTouchToLCD()
-//    原因: OTA page / 主畫面嘅 tap 偵測只用 touchIsPressed() 判斷「有冇撳」,
-//    完全唔用座標 (避免 CYD raw range 校準偏差)。如果日後要做「撳某個掣」,
-//    再按呢個 mapping 加返:
-//      x = map(rawX, 200, 3900, 0, 320);  y = map(rawY, 200, 3900, 0, 240);
+// ⚠️ 已移除未使用嘅 mapTouchToLCD() — v1.0.11 改由 touchGetPoint() 直接回傳 screen pixel
+//    (calibration mapping 已內置,callers 唔使再做 map())
 // =====================================================
 
 // =====================================================
@@ -2389,16 +2389,19 @@ void checkTouchTap() {
   static unsigned long pressStartMs = 0;
   static unsigned long lastTapMs = 0;
   static bool longPressFired = false;  // 防止按住 3 秒以上重覆觸發
+  static int pressX = -1, pressY = -1; // ✅ v1.0.11: 撳落時即時 sample (手指未放)
   const unsigned long TAP_DEBOUNCE = 300;
   const unsigned long LONG_PRESS_MS = 3000;
 
   bool pressed = touchIsPressed();
 
   if (pressed && !wasPressed) {
-    // Press down edge — 記住開始時間
+    // Press down edge — 記住開始時間 + 即時 sample 座標 (手指仲撳緊)
     wasPressed = true;
     pressStartMs = millis();
     longPressFired = false;
+    touchGetPoint(&pressX, &pressY);
+    Serial.printf("【Touch】press down @ screen(%d, %d)\n", pressX, pressY);
   } else if (pressed && wasPressed) {
     // ✅ 仍然按住 → 檢查夠唔夠 3 秒,夠就即時 toggle (唔需要等放開)
     if (!longPressFired && millis() - pressStartMs >= LONG_PRESS_MS) {
@@ -2407,7 +2410,7 @@ void checkTouchTap() {
       toggleFlipClock();
     }
   } else if (!pressed && wasPressed) {
-    // Release edge
+    // Release edge — 用 press-down 嘅座標 (手指已經放開,sample 唔到)
     wasPressed = false;
     unsigned long held = millis() - pressStartMs;
 
@@ -2427,38 +2430,36 @@ void checkTouchTap() {
       return;
     }
 
-    // ✅ Expanded route → 撳「← 返回」button (x=4-60, y=0-36) 退出
+    // ✅ 用 press-down 嘅 screen 座標 (calibration mapping 已喺 touchGetPoint 做咗)
+    int tx = pressX, ty = pressY;
+    Serial.printf("【Touch】release @ screen(%d, %d) held=%lu\n", tx, ty, held);
+
+    // ✅ Expanded route → 撳「← 返回」button (x=0-60, y=0-36) 退出
     if (expandedRouteIdx >= 0) {
-      int tx, ty;
-      if (touchGetPoint(&tx, &ty)) {
-        if (tx < 60 && ty < 36) {
-          Serial.println("【Touch】退出 expanded route");
-          expandedRouteIdx = -1;
-          expandedStopIdx = -1;
-          displayCurrentPage();
-        }
-        // 其他位置: 唔做嘢 (避免誤撳退出)
+      if (tx >= 0 && tx < 60 && ty >= 0 && ty < 36) {
+        Serial.println("【Touch】退出 expanded route");
+        expandedRouteIdx = -1;
+        expandedStopIdx = -1;
+        displayCurrentPage();
       }
+      // 其他位置: 唔做嘢 (避免誤撳退出)
       return;
     }
 
     // ✅ Main page: 撳 row → expanded that route
-    int tx, ty;
-    if (touchGetPoint(&tx, &ty)) {
-      // Row y range: 30-210 (5 rows × 36px)
-      if (ty >= 30 && ty < 210) {
-        int rowIdx = (ty - 30) / 36;  // 0-4
-        int stopIdx, groupStart, groupCount;
-        getPageInfo(currentPage, stopIdx, groupStart, groupCount);
-        int targetGroup = groupStart + rowIdx;
-        if (targetGroup < groupStart + groupCount && targetGroup < stops[stopIdx].totalGroups) {
-          Serial.printf("【Touch】expanded route #%d (%s 往 %s)\n",
-                        targetGroup, stops[stopIdx].groups[targetGroup].route.c_str(),
-                        stops[stopIdx].groups[targetGroup].dest.c_str());
-          expandedRouteIdx = targetGroup;
-          expandedStopIdx = stopIdx;
-          displayCurrentPage();
-        }
+    //   Row y range: 30-210 (5 rows × 36px)
+    if (ty >= 30 && ty < 210) {
+      int rowIdx = (ty - 30) / 36;  // 0-4
+      int stopIdx, groupStart, groupCount;
+      getPageInfo(currentPage, stopIdx, groupStart, groupCount);
+      int targetGroup = groupStart + rowIdx;
+      if (targetGroup < groupStart + groupCount && targetGroup < stops[stopIdx].totalGroups) {
+        Serial.printf("【Touch】expanded route #%d (%s 往 %s)\n",
+                      targetGroup, stops[stopIdx].groups[targetGroup].route.c_str(),
+                      stops[stopIdx].groups[targetGroup].dest.c_str());
+        expandedRouteIdx = targetGroup;
+        expandedStopIdx = stopIdx;
+        displayCurrentPage();
       }
     }
   }

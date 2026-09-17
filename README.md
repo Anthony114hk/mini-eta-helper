@@ -86,6 +86,12 @@ git push origin main
 
 ### Changelog
 
+**v1.0.11** — Fix row tap (calibration mapping + sample on press-down)
+- **Bug 修咗**: `checkTouchTap()` 之前用 RAW XPT2046 值 (200-3900) 同 screen pixel (30-210) 比較,冇 calibration mapping → row tap 永遠唔 trigger
+- `touchGetPoint()` 改為回傳 **screen pixel 座標** (rotation=1 landscape 320x240),內部用 `map(rawX, 200, 3900, 0, 320)` + `map(rawY, 200, 3900, 0, 240)` 做 calibration
+- **Sample 時機修咗**: 之前 release 時 call `touchGetPoint()` → 手指已離開,讀到 invalid → tap ignored。改為 press-down edge 即時 sample 座標,release 時用 cached 值
+- 加 static `pressX` / `pressY` 喺 `checkTouchTap()` cache press-down 位置
+
 **v1.0.10** — Long-press fires WHILE pressing (not on release)
 - v1.0.9 嘅長撳 3 秒邏輯要 release 先觸發 → 用戶體驗差 (按住等幾秒乜都唔見到,要放開先跳)
 - v1.0.10 改為按住到 3 秒 mark 即時 toggle flip clock (唔需要放開手指)
