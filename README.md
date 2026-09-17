@@ -86,9 +86,17 @@ git push origin main
 
 ### Changelog
 
+**v1.0.9** — Long-press 3s toggle flip clock (instead of short tap)
+- `checkTouchTap()` 行為改動:
+  - **短撳 (< 3 秒)**: 展開 / 退出 row (維持 v1.0.8 行為)
+  - **長撳 (≥ 3 秒)**: toggle flip clock (入 / 出) — 取代舊版「撳任何位置 toggle flip clock」
+- Flip clock mode 內短撳會 ignored (避免誤撳展開 row)
+- 加 `LONG_PRESS_MS = 3000` constant + `pressStartMs` static tracker
+
 **v1.0.8** — UI redesign (single ETA + tap-to-expand) on top of v1.0.7 GPIO rewrite
 - **每行只顯示一個時間 (倒數分鐘)** — 之前每行擺全部班次「21:50 22:15 22:40」跑馬燈 scroll,睇唔到下一班幾時到;新 design 只顯示下一班 ETA + 顏色編碼 (RED ≤ 0 分 / ORANGE < 3 分 / WHITE < 10 分 / LIGHTGREY > 10 分)
 - **Tap row 展開 full-screen route detail** — 撳任何一個 bus row (y=30-210, 36px 高) → 顯示該路線嘅全部班次 list (絕對時間 + 倒數分鐘),撳左上「← 返回」退出
+- **長撳 3 秒 toggle flip clock** — 短撳 (tap) 只係展開 row / 退出 expanded;按住畫面 3 秒先跳去時鐘,再按住 3 秒返回巴士頁
 - **新 layout**: 深藍 header bar (TFT_NAVY, y=0-28) 顯示 stop name / 路線總數 / 當前時間 / 頁數,5 行 bus rows × 36px (y=30-210),footer 顯示更新時間 + 提示
 - 移除舊版 weather 跑馬燈 + bus line 跑馬燈 (新 design 唔需要 scroll,慳 CPU)
 - 加 4 個 helper functions: `etaMinutesFromNow()` / `etaToRemainingText()` / `etaToColor()` / `drawBusIcon()` (16×12 巴士 icon)

@@ -502,7 +502,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.8"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.9"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -2386,56 +2386,72 @@ void pollGPIO0Button() {
 // =====================================================
 void checkTouchTap() {
   static bool wasPressed = false;
+  static unsigned long pressStartMs = 0;
   static unsigned long lastTapMs = 0;
   const unsigned long TAP_DEBOUNCE = 300;
+  const unsigned long LONG_PRESS_MS = 3000;  // ✅ v1.0.8: hold 3 秒 toggle flip clock
 
   bool pressed = touchIsPressed();
 
   if (pressed && !wasPressed) {
+    // Press down edge — 記住開始時間
     wasPressed = true;
+    pressStartMs = millis();
   } else if (!pressed && wasPressed) {
+    // Release edge
     wasPressed = false;
-    if (millis() - lastTapMs > TAP_DEBOUNCE) {
-      lastTapMs = millis();
+    unsigned long held = millis() - pressStartMs;
 
-      // ✅ 如果 expanded route → 撳「← 返回」button (x=4-60, y=0-36) 退出
-      if (expandedRouteIdx >= 0) {
-        int tx, ty;
-        if (touchGetPoint(&tx, &ty)) {
-          if (tx < 60 && ty < 36) {
-            Serial.println("【Touch】退出 expanded route");
-            expandedRouteIdx = -1;
-            expandedStopIdx = -1;
-            displayCurrentPage();
-          }
-          // 其他位置: 唔做嘢 (避免誤撳退出)
-        }
-        return;
-      }
+    // ✅ 長撳 3 秒先 → toggle flip clock (入 / 出)
+    if (held >= LONG_PRESS_MS) {
+      Serial.printf("【Touch】長撳 %lu ms → toggle flip clock\n", held);
+      toggleFlipClock();
+      return;
+    }
 
-      // ✅ Main page: 撳 row → expanded that route
+    // 短撳 (< 3 秒) — 先過 debounce
+    if (millis() - lastTapMs <= TAP_DEBOUNCE) return;
+    lastTapMs = millis();
+
+    // ✅ Flip clock mode → 短撳唔做嘢 (避免誤撳展開 row)
+    if (flipClockMode) {
+      Serial.println("【Touch】flip clock mode, short tap ignored");
+      return;
+    }
+
+    // ✅ Expanded route → 撳「← 返回」button (x=4-60, y=0-36) 退出
+    if (expandedRouteIdx >= 0) {
       int tx, ty;
       if (touchGetPoint(&tx, &ty)) {
-        // Row y range: 30-210 (5 rows × 36px)
-        if (ty >= 30 && ty < 210) {
-          int rowIdx = (ty - 30) / 36;  // 0-4
-          int stopIdx, groupStart, groupCount;
-          getPageInfo(currentPage, stopIdx, groupStart, groupCount);
-          int targetGroup = groupStart + rowIdx;
-          if (targetGroup < groupStart + groupCount && targetGroup < stops[stopIdx].totalGroups) {
-            Serial.printf("【Touch】expanded route #%d (%s 往 %s)\n",
-                          targetGroup, stops[stopIdx].groups[targetGroup].route.c_str(),
-                          stops[stopIdx].groups[targetGroup].dest.c_str());
-            expandedRouteIdx = targetGroup;
-            expandedStopIdx = stopIdx;
-            displayCurrentPage();
-            return;
-          }
+        if (tx < 60 && ty < 36) {
+          Serial.println("【Touch】退出 expanded route");
+          expandedRouteIdx = -1;
+          expandedStopIdx = -1;
+          displayCurrentPage();
+        }
+        // 其他位置: 唔做嘢 (避免誤撳退出)
+      }
+      return;
+    }
+
+    // ✅ Main page: 撳 row → expanded that route
+    int tx, ty;
+    if (touchGetPoint(&tx, &ty)) {
+      // Row y range: 30-210 (5 rows × 36px)
+      if (ty >= 30 && ty < 210) {
+        int rowIdx = (ty - 30) / 36;  // 0-4
+        int stopIdx, groupStart, groupCount;
+        getPageInfo(currentPage, stopIdx, groupStart, groupCount);
+        int targetGroup = groupStart + rowIdx;
+        if (targetGroup < groupStart + groupCount && targetGroup < stops[stopIdx].totalGroups) {
+          Serial.printf("【Touch】expanded route #%d (%s 往 %s)\n",
+                        targetGroup, stops[stopIdx].groups[targetGroup].route.c_str(),
+                        stops[stopIdx].groups[targetGroup].dest.c_str());
+          expandedRouteIdx = targetGroup;
+          expandedStopIdx = stopIdx;
+          displayCurrentPage();
         }
       }
-
-      // 撳 footer / header → toggle flip clock (向後兼容舊行為)
-      toggleFlipClock();
     }
   }
 }
@@ -2656,9 +2672,10 @@ void loop() {
 
   // ==========================================
   // Touch tap (v1.0.8):
-  //   - expanded route → tap「← 返回」button 退出
-  //   - main page row tap → expanded that route
-  //   - 其他位置 tap → toggle flip clock (向後兼容)
+  //   短撳 (< 3 秒):
+  //     - expanded route → tap「← 返回」button 退出
+  //     - main page row tap → expanded that route
+  //   長撳 (≥ 3 秒): toggle flip clock (入 / 出)
   // ==========================================
   checkTouchTap();
 
