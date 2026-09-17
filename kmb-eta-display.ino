@@ -521,7 +521,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.13"                // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.14"                // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -1262,12 +1262,59 @@ void drawBusLine(BusGroup& group, int yPos, bool clearFirst) {
 }
 
 // =====================================================
+// v1.0.14: Footer — 左邊「更新於 HH:MM」+ 右邊天氣預報跑馬燈
+//   y=216-240 (24px tall)
+//   - 左 6-110 (104px): "更新於 23:17"
+//   - 右 110-318 (208px): weather.summary 跑馬燈 (cyan)
+// =====================================================
+void drawFooter() {
+  lcd.drawFastHLine(0, 216, 320, TFT_DARKGREY);
+
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+
+  // 左: 更新於 HH:MM
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.setCursor(6, 220);
+  lcd.printf("更新於 %s", getSystemTime().c_str());
+
+  // 右: 天氣預報 (cyan, 跑馬燈 if too long)
+  drawWeatherFooter();
+}
+
+// ✅ v1.0.14: 渲染 footer 右邊天氣預報 (跑馬燈 or 靜態)
+//   call: 初次 displayCurrentPage + 每個 marquee frame
+//   ⚠️ 已 fillRect 過 weather area,放心 call
+void drawWeatherFooter() {
+  if (!weather.loaded || weather.summary.length() == 0) return;
+
+  // 清 weather footer area (x=110-320, y=216-240)
+  lcd.fillRect(110, 216, 210, 24, TFT_BLACK);
+
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+
+  // Copy 1
+  int x1 = 110 - (int)weather.scrollX;
+  drawStringWithBu(weather.summary, x1, 220, TFT_CYAN);
+
+  // Copy 2 (if need marquee + still on-screen)
+  if (weather.needMarquee) {
+    int x2 = x1 + weather.textWidth + 40;
+    if (x2 < 318) {
+      drawStringWithBu(weather.summary, x2, 220, TFT_CYAN);
+    }
+  }
+}
+
+// =====================================================
 // 渲染當前頁 (v1.0.8 新 design: dark blue header bar + 5 條 bus rows)
 //   landscape 320x240 layout:
 //     y=0-28:   Header bar (dark blue TFT_NAVY, stop name + time + page)
 //     y=28-30:  Separator
 //     y=30-210: 5 條 bus rows × 36px
-//     y=210-240: Footer (更新於 HH:MM + 撳 row 提示)
+//     y=210-240: Footer (更新於 HH:MM + 天氣預報跑馬燈)
 // =====================================================
 void displayCurrentPage() {
   lcd.fillScreen(TFT_BLACK);
@@ -1281,6 +1328,9 @@ void displayCurrentPage() {
 
   int stopIdx, groupStart, groupCount;
   getPageInfo(currentPage, stopIdx, groupStart, groupCount);
+
+  // ✅ v1.0.14: 重置 weather scroll,確保重新 render 嗰陣由頭開始 scroll
+  weather.scrollX = 0;
 
   // === Header bar (dark blue) y=0-28 ===
   lcd.fillRect(0, 0, 320, 28, TFT_NAVY);
@@ -1324,10 +1374,7 @@ void displayCurrentPage() {
     lcd.setTextColor(TFT_ORANGE, TFT_BLACK);
     lcd.print("沒有實時巴士班次");
     // Footer
-    lcd.drawFastHLine(0, 216, 320, TFT_DARKGREY);
-    lcd.setCursor(6, 220);
-    lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    lcd.printf("更新於 %s", getSystemTime().c_str());
+    drawFooter();
     return;
   }
 
@@ -1338,14 +1385,7 @@ void displayCurrentPage() {
   }
 
   // === Footer (y=216-240) ===
-  lcd.drawFastHLine(0, 216, 320, TFT_DARKGREY);
-  lcd.setCursor(6, 220);
-  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  lcd.printf("更新於 %s", getSystemTime().c_str());
-
-  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  lcd.setCursor(180, 220);
-  lcd.print("撳路線睇更多");
+  drawFooter();
 }
 
 // =====================================================
@@ -2727,8 +2767,17 @@ void loop() {
   int totalPages = calculateTotalPages();
   if (totalPages == 0) totalPages = 1;
 
-  // ✅ v1.0.8: 新 design 冇跑馬燈, 唔需要 marquee update loop
-  //           (留低 lastMarqueeUpdate 純粹為咗向後兼容其他可能引用嘅 code)
+  // ✅ v1.0.14: Footer 天氣跑馬燈 (只喺 main page 跑, expanded 唔跑)
+  //   唔再郁 bus line,只係 scroll weather summary
+  if (expandedRouteIdx < 0 && weather.loaded && weather.needMarquee
+      && currentMillis - lastMarqueeUpdate >= marqueeInterval) {
+    weather.scrollX += scrollSpeed;
+    if (weather.scrollX >= (weather.textWidth + 40)) {
+      weather.scrollX = 0;
+    }
+    drawWeatherFooter();  // 每 frame 重畫 weather area
+    lastMarqueeUpdate = currentMillis;
+  }
 
   // ✅ 定期更新天氣 (15 分鐘)
   if (currentMillis - lastWeatherUpdate >= weatherInterval) {

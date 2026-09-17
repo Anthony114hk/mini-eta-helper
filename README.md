@@ -86,6 +86,14 @@ git push origin main
 
 ### Changelog
 
+**v1.0.14** — Footer redesigned: only "更新於 HH:MM" + 天氣預報跑馬燈
+- 移除 footer 右邊 "撳路線睇更多" 提示 (唔再需要,row tap 行為已知)
+- 加返天氣預報跑馬燈喺 footer 右邊 (x=110-318, 208px 闊,cyan)
+- Footer layout: 左 6-110「更新於 23:17」+ 右 110-318「weather.summary」跑馬燈
+- 加 `drawFooter()` + `drawWeatherFooter()` helpers,提取共用 footer 邏輯
+- Marquee 只喺 main page 跑 (expanded view 唔郁)
+- displayCurrentPage() 開始時 reset weather.scrollX = 0
+
 **v1.0.13** — Fix calibration range (raw ADC) — Y was not inverted, range was too wide
 - 用戶實測 4 角 raw mapping 數據:
   - 左上 → (-8, 242)       右上 → (147, 229)
