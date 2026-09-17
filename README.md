@@ -86,6 +86,12 @@ git push origin main
 
 ### Changelog
 
+**v1.0.12** — Fix Y-axis inversion + remove redundant sub-header
+- **Issue 1**: 撳 row N 展開咗另一條 row → CYD 板子 Y 軸方向反轉,加 `TOUCH_Y_INVERT=1` flag (預設開)。如果 X 軸都反,改 `TOUCH_X_INVERT=1`
+- **Issue 2**: 刪除 expanded view 嘅 sub-header stop name (destination = stop name → 重複顯示)。新 design 只剩 route + destination 單行 header
+- Header 太長自動截短 (用 `textWidthWithBu()` + UTF-8 safe 切字)
+- touchGetPoint() 加 `【Touch】raw(...) → screen(...)` log 方便 debug
+
 **v1.0.11** — Fix row tap (calibration mapping + sample on press-down)
 - **Bug 修咗**: `checkTouchTap()` 之前用 RAW XPT2046 值 (200-3900) 同 screen pixel (30-210) 比較,冇 calibration mapping → row tap 永遠唔 trigger
 - `touchGetPoint()` 改為回傳 **screen pixel 座標** (rotation=1 landscape 320x240),內部用 `map(rawX, 200, 3900, 0, 320)` + `map(rawY, 200, 3900, 0, 240)` 做 calibration

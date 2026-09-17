@@ -454,11 +454,16 @@ bool touchIsPressed() {
 }
 
 // =====================================================
-// v1.0.11: 讀 XPT2046 座標 + calibration mapping → 屏幕 pixel
+// v1.0.12: 讀 XPT2046 座標 + calibration mapping → 屏幕 pixel
 //    回傳屏幕座標 (rotation=1 landscape: 320x240),唔係 raw ADC 值
 //    mapping: x = map(rawX, 200, 3900, 0, 320); y = map(rawY, 200, 3900, 0, 240);
 // =====================================================
 #define ENABLE_TOUCH_RAW_POINT 1   // ✅ v1.0.8: UI redesign 需要 row tap 座標
+
+// v1.0.12: 唔同 CYD 板子 Y/X 軸方向可能反轉
+//    如果發現 tap 上面反而展開下面 → 改下面兩個 INVERT flag = 1
+#define TOUCH_X_INVERT  0
+#define TOUCH_Y_INVERT  1   // ✅ v1.0.12: 預設反轉 Y (之前 row tap 撳錯 row)
 
 #if ENABLE_TOUCH_RAW_POINT
 bool touchGetPoint(int* x, int* y) {
@@ -475,13 +480,16 @@ bool touchGetPoint(int* x, int* y) {
   int rawX = sumX / 5;
   int rawY = sumY / 5;
 
-  // ✅ v1.0.11: Calibration mapping (raw 200-3900 → screen 0-320/0-240)
-  //    如果 Y 軸方向反咗可以 swap map() 嘅 a/b
-  *x = map(rawX, 200, 3900, 0, 320);
-  *y = map(rawY, 200, 3900, 0, 240);
+  // ✅ v1.0.11/12: Calibration mapping (raw 200-3900 → screen 0-320/0-240)
+  //    用 INVERT flag 控制方向
+  *x = (TOUCH_X_INVERT) ? map(rawX, 200, 3900, 320, 0) : map(rawX, 200, 3900, 0, 320);
+  *y = (TOUCH_Y_INVERT) ? map(rawY, 200, 3900, 240, 0) : map(rawY, 200, 3900, 0, 240);
 
   // Valid range check (屏幕 pixel)
   bool valid = (*x >= 0 && *x < 320 && *y >= 0 && *y < 240);
+  if (valid) {
+    Serial.printf("【Touch】raw(%u, %u) → screen(%d, %d)\n", rawX, rawY, *x, *y);
+  }
   return valid;
 }
 #endif  // ENABLE_TOUCH_RAW_POINT
@@ -505,7 +513,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.11"                // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.12"                // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -1349,19 +1357,21 @@ void drawExpandedRoute(BusGroup& group, int stopIdx) {
   lcd.setCursor(6, 10);
   lcd.print("← 返回");
 
-  // Route + destination (yellow)
+  // ✅ v1.0.12: 簡化 header — 只顯示 route + destination (單行)
+  //    移除 sub-header stop name (destination 通常已經係 stop name → 重複)
   lcd.setCursor(58, 10);
   lcd.setTextColor(TFT_YELLOW, TFT_NAVY);
-  lcd.printf("%s 往 %s", group.route.c_str(), group.dest.c_str());
-
-  // Sub-header (stop name)
-  lcd.setTextColor(TFT_CYAN, TFT_NAVY);
-  lcd.setCursor(58, 26);
-  if (stops[stopIdx].stopName != "") {
-    drawStringWithBu(stops[stopIdx].stopName, 58, 26, TFT_CYAN);
-  } else {
-    lcd.print("Stop " + String(stopIdx + 1));
+  String header = group.route + " 往 " + group.dest;
+  // 太長就截短 (右邊到 x=315 預留空間)
+  int maxHdrW = 250;
+  if (textWidthWithBu(header) > maxHdrW) {
+    while (header.length() > 0 && textWidthWithBu(header + "…") > maxHdrW) {
+      int cut = utf8Len((unsigned char)header[header.length() - 1]);
+      header.remove(header.length() - cut);
+    }
+    header += "…";
   }
+  drawStringWithBu(header, 58, 10, TFT_YELLOW);
 
   lcd.drawFastHLine(0, 36, 320, TFT_DARKGREY);
 
