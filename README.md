@@ -86,6 +86,14 @@ git push origin main
 
 ### Changelog
 
+**v1.0.13** — Fix calibration range (raw ADC) — Y was not inverted, range was too wide
+- 用戶實測 4 角 raw mapping 數據:
+  - 左上 → (-8, 242)       右上 → (147, 229)
+  - 左下 → (-4, 130)       右下 → (147, 139)
+- 修正: `TOUCH_Y_INVERT=1 → 0` (rawY LOW = 物理頂部,唔需要 invert)
+- 修正: 加 `X_RAW_MIN=250 / X_RAW_MAX=1900` + `Y_RAW_MIN/MAX` 常數 — 之前用 [200, 3900] 範圍太闊,呢塊板 rawY 只覆蓋 [~170, ~1900],所以 over-map 令到 bottom row 撳到只去到 ty=130 唔係 240
+- 改 calibration 後: top → ty≈0, bottom → ty≈240,row tap 終於對返 ✓
+
 **v1.0.12** — Fix Y-axis inversion + remove redundant sub-header
 - **Issue 1**: 撳 row N 展開咗另一條 row → CYD 板子 Y 軸方向反轉,加 `TOUCH_Y_INVERT=1` flag (預設開)。如果 X 軸都反,改 `TOUCH_X_INVERT=1`
 - **Issue 2**: 刪除 expanded view 嘅 sub-header stop name (destination = stop name → 重複顯示)。新 design 只剩 route + destination 單行 header

@@ -460,10 +460,18 @@ bool touchIsPressed() {
 // =====================================================
 #define ENABLE_TOUCH_RAW_POINT 1   // ✅ v1.0.8: UI redesign 需要 row tap 座標
 
-// v1.0.12: 唔同 CYD 板子 Y/X 軸方向可能反轉
-//    如果發現 tap 上面反而展開下面 → 改下面兩個 INVERT flag = 1
+// v1.0.13: 唔同 CYD 板子 raw ADC 範圍 + 軸方向都唔同
+//    用戶實測數據 (撳 4 角):
+//      左上 → screen(-8, 242)        右上 → screen(147, 229)
+//      左下 → screen(-4, 130)        右下 → screen(147, 139)
+//    結論: rawY LOW = 物理頂部 (唔需要 invert)
+//          範圍只有 ~[170, 1900] 唔係 [200, 3900],需要縮窄 calibration
 #define TOUCH_X_INVERT  0
-#define TOUCH_Y_INVERT  1   // ✅ v1.0.12: 預設反轉 Y (之前 row tap 撳錯 row)
+#define TOUCH_Y_INVERT  0   // ✅ v1.0.13: 之前誤反 Y,改返 0
+#define X_RAW_MIN 250
+#define X_RAW_MAX 1900       // ✅ v1.0.13: 縮窄 X range (用戶實測 ≈ [clamped 0, 1700])
+#define Y_RAW_MIN 250
+#define Y_RAW_MAX 1900       // ✅ v1.0.13: 縮窄 Y range (用戶實測 ≈ [170, 1900])
 
 #if ENABLE_TOUCH_RAW_POINT
 bool touchGetPoint(int* x, int* y) {
@@ -480,10 +488,10 @@ bool touchGetPoint(int* x, int* y) {
   int rawX = sumX / 5;
   int rawY = sumY / 5;
 
-  // ✅ v1.0.11/12: Calibration mapping (raw 200-3900 → screen 0-320/0-240)
+  // ✅ v1.0.13: Calibration mapping (用 X_RAW_MIN/MAX, Y_RAW_MIN/MAX 常數)
   //    用 INVERT flag 控制方向
-  *x = (TOUCH_X_INVERT) ? map(rawX, 200, 3900, 320, 0) : map(rawX, 200, 3900, 0, 320);
-  *y = (TOUCH_Y_INVERT) ? map(rawY, 200, 3900, 240, 0) : map(rawY, 200, 3900, 0, 240);
+  *x = (TOUCH_X_INVERT) ? map(rawX, X_RAW_MAX, X_RAW_MIN, 0, 320) : map(rawX, X_RAW_MIN, X_RAW_MAX, 0, 320);
+  *y = (TOUCH_Y_INVERT) ? map(rawY, Y_RAW_MAX, Y_RAW_MIN, 0, 240) : map(rawY, Y_RAW_MIN, Y_RAW_MAX, 0, 240);
 
   // Valid range check (屏幕 pixel)
   bool valid = (*x >= 0 && *x < 320 && *y >= 0 && *y < 240);
@@ -513,7 +521,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.12"                // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.13"                // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
