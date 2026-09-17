@@ -86,6 +86,16 @@ git push origin main
 
 ### Changelog
 
+**v1.0.8** — UI redesign (single ETA + tap-to-expand) on top of v1.0.7 GPIO rewrite
+- **每行只顯示一個時間 (倒數分鐘)** — 之前每行擺全部班次「21:50 22:15 22:40」跑馬燈 scroll,睇唔到下一班幾時到;新 design 只顯示下一班 ETA + 顏色編碼 (RED ≤ 0 分 / ORANGE < 3 分 / WHITE < 10 分 / LIGHTGREY > 10 分)
+- **Tap row 展開 full-screen route detail** — 撳任何一個 bus row (y=30-210, 36px 高) → 顯示該路線嘅全部班次 list (絕對時間 + 倒數分鐘),撳左上「← 返回」退出
+- **新 layout**: 深藍 header bar (TFT_NAVY, y=0-28) 顯示 stop name / 路線總數 / 當前時間 / 頁數,5 行 bus rows × 36px (y=30-210),footer 顯示更新時間 + 提示
+- 移除舊版 weather 跑馬燈 + bus line 跑馬燈 (新 design 唔需要 scroll,慳 CPU)
+- 加 4 個 helper functions: `etaMinutesFromNow()` / `etaToRemainingText()` / `etaToColor()` / `drawBusIcon()` (16×12 巴士 icon)
+- 啟用 `touchGetPoint()` (原本 #if 0 包住,v1.0.8 需要 row tap 座標)
+- 加 `expandedRouteIdx` / `expandedStopIdx` state variables
+- Firmware size: 約 1,865 KB (94%)
+
 **v1.0.6** — Fix OTA early-EOF + Chinese glyph coverage (邨/鰂/脷 were missing)
 - **OTA `read 提前 EOF` 真正原因**: `Stream::readBytes()` 會逐個 byte 呼叫 `read()`,而 `NetworkClientSecure::read()` 係「buffer 冇 data 就即刻 return -1」嘅語意。舊 code 只要 `read <= 0` 就 `Update.abort()`,一次都唔重試 → 表面睇落好似「下載斷咗」,其實係自己 abort 咗
 - Fix: 對齊官方 `Update.writeStream()` 策略 — `read <= 0` 唔再即死,100ms 後重試,最多 30 秒冇新 data 才放棄;改用 raw `stream->read()` + 2KB heap buffer;完工核對 `written == Content-Length`;每次進度報告加 `heap=`,失敗 dump `connected/available/heap/shortReads`

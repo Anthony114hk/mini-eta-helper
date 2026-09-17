@@ -458,7 +458,7 @@ bool touchIsPressed() {
 //    而家 tap 偵測只靠 touchIsPressed(), 唔需要座標 (避免 calibration 偏差)
 //    要校準嘅話把下面 0 改成 1, 再自己喺 loop 呼叫 touchGetPoint()
 // =====================================================
-#define ENABLE_TOUCH_RAW_POINT 0
+#define ENABLE_TOUCH_RAW_POINT 1   // ✅ v1.0.8: UI redesign 需要 row tap 座標
 
 #if ENABLE_TOUCH_RAW_POINT
 bool touchGetPoint(int* x, int* y) {
@@ -502,7 +502,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.7"                 // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.8"                 // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -517,6 +517,9 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 #define FC_BG_COLOR        0x0000   // pure black
 #define FC_DIGIT_COLOR     0xFFFF   // white segments
 #define FC_HINT_COLOR      0x5070A0 // dim blue hint at bottom
+
+// v1.0.8: UI redesign header bar 顏色 (深藍底)
+#define TFT_NAVY           0x000F   // RGB565: 深藍 (#000050 系)
 
 // 7-segment digit cell layout (70x200 each, full-screen fill)
 // Total inner width: 4*70 + 2*4 (digit gaps) + 2*6 (colon gaps) = 300
@@ -560,6 +563,13 @@ int otaProgress = 0;            // 0-100
 bool flipClockMode = false;
 unsigned long lastFlipClockUpdate = 0;
 char fcPrevH0 = ' ', fcPrevH1 = ' ', fcPrevM0 = ' ', fcPrevM1 = ' ';  // for diff-redraw
+
+// v1.0.8 UI redesign: tap-to-expand state
+//    expandedRouteIdx >= 0 → 顯示 expanded route detail page
+//    tap row N → set expandedRouteIdx = N
+//    tap 「← 返回」button → set expandedRouteIdx = -1
+int expandedRouteIdx = -1;
+int expandedStopIdx = -1;
 
 // GPIO 0 button state machine
 enum BtnState { BTN_IDLE, BTN_WAIT_RELEASE, BTN_WAIT_DOUBLE_TAP };
@@ -1132,134 +1142,282 @@ void fetchWeather() {
 }
 
 // =====================================================
-// 渲染單行 (支持跑馬燈)
+// v1.0.8 UI redesign: ETA 倒數 helper functions
+//   輸入 ETA "21:50" + 當前時間 → "5 分" / "即將" / "1 時 30 分"
+//   處理跨午夜情況 (例如 23:50 → 00:30)
 // =====================================================
-void drawBusLine(BusGroup& group, int yPos, bool clearFirst) {
-  // ✅ efontTW_16 畫大部份繁體中文字 + 埗 bitmap overlay
-  lcd.setFont(&fonts::efontTW_16);
-  lcd.setTextSize(1);
-  lcd.setClipRect(10, yPos, maxDisplayWidth, 25);
+int etaMinutesFromNow(String etaTime) {
+  if (etaTime.length() < 5) return 999;  // 冇時間數據
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return 999;  // NTP 未同步
+  int nowMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
 
-  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  int etaH = etaTime.substring(0, 2).toInt();
+  int etaM = etaTime.substring(3, 5).toInt();
+  int etaMin = etaH * 60 + etaM;
 
-  if (group.needMarquee) {
-    int x1 = 10 - (int)group.scrollX;
-    int x2 = x1 + group.textWidth + 40;
+  // 跨午夜: 如果 ETA 比 now 細超過 12 小時, 當下日計 (加 24h)
+  if (etaMin < nowMin - 720) etaMin += 1440;
 
-    // ✅ 只清右邊 scrollSpeed+1 像素嘅殘留 (唔再 fillRect 成個 strip → 唔再閃)
-    if (clearFirst) {
-      int trailW = (int)ceil(scrollSpeed) + 1;
-      int clearX1 = x1 + group.textWidth;
-      if (clearX1 >= 10 && clearX1 < 10 + maxDisplayWidth) {
-        lcd.fillRect(clearX1, yPos, min(trailW, 10 + maxDisplayWidth - clearX1), 25, TFT_BLACK);
-      }
-      int clearX2 = x2 + group.textWidth;
-      if (clearX2 >= 10 && clearX2 < 10 + maxDisplayWidth) {
-        lcd.fillRect(clearX2, yPos, min(trailW, 10 + maxDisplayWidth - clearX2), 25, TFT_BLACK);
-      }
-    }
+  return etaMin - nowMin;
+}
 
-    // ✅ 用 drawStringWithBu 處理「埗」bitmap overlay (deep water 埗, efontTW 缺)
-    drawStringWithBu(group.fullText, x1, yPos, TFT_WHITE);
-    if (x2 < 10 + maxDisplayWidth) {
-      drawStringWithBu(group.fullText, x2, yPos, TFT_WHITE);
-    }
-  } else {
-    if (clearFirst) {
-      lcd.fillRect(10, yPos, maxDisplayWidth, 25, TFT_BLACK);
-    }
-    drawStringWithBu(group.fullText, 10, yPos, TFT_WHITE);
-  }
+// 將 minutes 差轉成中文顯示字串
+String etaToRemainingText(int minutesDiff) {
+  if (minutesDiff <= 0) return "即將";
+  if (minutesDiff < 60) return String(minutesDiff) + " 分";
+  int hr = minutesDiff / 60;
+  int mn = minutesDiff % 60;
+  if (mn == 0) return String(hr) + " 時";
+  return String(hr) + " 時" + String(mn) + " 分";
+}
 
-  lcd.clearClipRect();
+// 根據 minutes 揀顏色
+uint16_t etaToColor(int minutesDiff) {
+  if (minutesDiff <= 0) return TFT_RED;        // 即將到站 (0 或過咗)
+  if (minutesDiff < 3) return TFT_ORANGE;      // < 3 分鐘 (好快到)
+  if (minutesDiff < 10) return TFT_WHITE;      // 正常 (< 10 分)
+  return TFT_LIGHTGREY;                         // 仲有時間 (> 10 分)
+}
+
+// ✅ 簡單巴士 icon (16x12 rounded rect + 三個車窗 + 兩個車輪)
+void drawBusIcon(int x, int y, uint16_t color) {
+  lcd.fillRoundRect(x, y, 16, 12, 2, color);
+  lcd.fillRect(x + 2, y + 2, 3, 3, TFT_BLACK);
+  lcd.fillRect(x + 6, y + 2, 3, 3, TFT_BLACK);
+  lcd.fillRect(x + 10, y + 2, 3, 3, TFT_BLACK);
+  lcd.fillRect(x + 2, y + 8, 1, 2, TFT_BLACK);
+  lcd.fillRect(x + 13, y + 8, 1, 2, TFT_BLACK);
 }
 
 // =====================================================
-// 渲染當前頁
+// 渲染單行 bus route (v1.0.8 新 design: 1 個 ETA countdown + 撳展開)
+//   Layout (320x36): [icon] [route] [destination] [time countdown]
+//   冇跑馬燈 — 每行只顯示下一班到站時間 (倒數分鐘)
+// =====================================================
+void drawBusLine(BusGroup& group, int yPos, bool clearFirst) {
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+
+  if (clearFirst) {
+    lcd.fillRect(0, yPos, 320, 36, TFT_BLACK);
+  }
+
+  // Bus icon (16x12) @ x=6, y=yPos+10
+  drawBusIcon(6, yPos + 10, TFT_WHITE);
+
+  // Route number (cyan, efontTW_16)
+  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  drawStringWithBu(group.route, 28, yPos + 10, TFT_CYAN);
+
+  // Destination (white, truncate if too long)
+  String dest = group.dest;
+  int maxDestW = 130;
+  if (textWidthWithBu(dest) > maxDestW) {
+    while (dest.length() > 0 && textWidthWithBu(dest + "...") > maxDestW) {
+      dest.remove(dest.length() - 1);
+    }
+    dest += "...";
+  }
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  drawStringWithBu(dest, 90, yPos + 10, TFT_WHITE);
+
+  // ETA countdown (colored by minutes) — 右邊對齊
+  if (group.etaCount > 0 && group.timeParts[0].length() >= 5) {
+    int minutesDiff = etaMinutesFromNow(group.timeParts[0]);
+    String timeText = etaToRemainingText(minutesDiff);
+    uint16_t timeColor = etaToColor(minutesDiff);
+    lcd.setTextColor(timeColor, TFT_BLACK);
+    // 右對齊: 由 x=316 往左 draw
+    int tw = lcd.textWidth(timeText);
+    lcd.setCursor(316 - tw, yPos + 10);
+    lcd.print(timeText);
+  } else {
+    lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    lcd.setCursor(260, yPos + 10);
+    lcd.print("尾班");
+  }
+
+  // Row separator line (底部分隔)
+  lcd.drawFastHLine(0, yPos + 35, 320, TFT_DARKGREY);
+}
+
+// =====================================================
+// 渲染當前頁 (v1.0.8 新 design: dark blue header bar + 5 條 bus rows)
+//   landscape 320x240 layout:
+//     y=0-28:   Header bar (dark blue TFT_NAVY, stop name + time + page)
+//     y=28-30:  Separator
+//     y=30-210: 5 條 bus rows × 36px
+//     y=210-240: Footer (更新於 HH:MM + 撳 row 提示)
 // =====================================================
 void displayCurrentPage() {
   lcd.fillScreen(TFT_BLACK);
 
-  int stopIdx, groupStart, groupCount;
-  getPageInfo(currentPage, stopIdx, groupStart, groupCount);
-
-  // ✅ 天氣跑馬燈 (y=0 至 y=18)
-  if (weather.loaded) {
-    lcd.setFont(&fonts::efontTW_16);
-    lcd.setClipRect(0, 0, 320, 18);
-    lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-
-    if (weather.needMarquee) {
-      int x1 = -(int)weather.scrollX;
-      lcd.drawString(weather.summary, x1, 0);
-      int x2 = x1 + weather.textWidth + 40;
-      lcd.drawString(weather.summary, x2, 0);
-    } else {
-      lcd.drawString(weather.summary, 0, 0);
-    }
-    lcd.clearClipRect();
-  }
-  lcd.drawFastHLine(0, 19, 320, TFT_DARKGREY);
-
-  // Header (y=22 至 y=40)
-  // ✅ efontTW_16 + drawStringWithBu 處理 stopName 內嘅缺失字 (bitmap overlay)
-  // ⚠️ 左邊止於 x=185: 右邊 195..320 係時間 (0..79px) + 頁數 (265..320)
-  //    站名太長就截短, 唔可以壓過去 (以前冇截 → 站名同時間重疊)
-  lcd.setFont(&fonts::efontTW_16);
-  if (stops[stopIdx].stopName != "") {
-    const int HEADER_LEFT = 10, HEADER_RIGHT = 185;
-    String header = stops[stopIdx].stopName + " ETA";
-    if (textWidthWithBu(header) > HEADER_RIGHT - HEADER_LEFT) {
-      // 逐個字砍到夠窄為止 (由尾砍, 保持 UTF-8 完整)
-      while (header.length() > 0 && textWidthWithBu(header + "…") > HEADER_RIGHT - HEADER_LEFT) {
-        int cut = utf8Len((unsigned char)header[header.length() - 1]);
-        header.remove(header.length() - cut);
-      }
-      header += "…";
-      // 連 "…" 都放唔落就索性唔顯示 " ETA"
-      if (textWidthWithBu(header) > HEADER_RIGHT - HEADER_LEFT) {
-        header = stops[stopIdx].stopName;
-        while (header.length() > 0 && textWidthWithBu(header) > HEADER_RIGHT - HEADER_LEFT) {
-          int cut = utf8Len((unsigned char)header[header.length() - 1]);
-          header.remove(header.length() - cut);
-        }
-      }
-    }
-    drawStringWithBu(header, HEADER_LEFT, 24, TFT_YELLOW);
-  } else {
-    lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
-    lcd.setCursor(10, 24);
-    lcd.print("Stop " + String(stopIdx + 1) + " ETA");
-  }
-
-  lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-  lcd.setCursor(195, 24);
-  lcd.print(getSystemTime());
-
-  int totalPages = calculateTotalPages();
-  if (totalPages == 0) totalPages = 1;
-
-  if (totalPages > 1) {
-    lcd.setCursor(265, 24);
-    lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-    lcd.printf("[%d/%d]", currentPage + 1, totalPages);
-  }
-  lcd.drawFastHLine(0, 44, 320, TFT_BLUE);
-
-  if (groupCount == 0) {
-    lcd.setCursor(10, 60);
-    lcd.setTextColor(TFT_ORANGE, TFT_BLACK);
-    lcd.println("沒有實時巴士班次");
+  // ✅ 如果有 expanded route → 顯示 full-screen route detail
+  if (expandedRouteIdx >= 0 && expandedStopIdx >= 0
+      && expandedRouteIdx < stops[expandedStopIdx].totalGroups) {
+    drawExpandedRoute(stops[expandedStopIdx].groups[expandedRouteIdx], expandedStopIdx);
     return;
   }
 
-  // 巴士行由 y=48 開始
-  int yPosition = 48;
-  for (int i = groupStart; i < groupStart + groupCount; i++) {
-    stops[stopIdx].groups[i].scrollX = 0;
-    drawBusLine(stops[stopIdx].groups[i], yPosition, false);
-    yPosition += 35;
+  int stopIdx, groupStart, groupCount;
+  getPageInfo(currentPage, stopIdx, groupStart, groupCount);
+
+  // === Header bar (dark blue) y=0-28 ===
+  lcd.fillRect(0, 0, 320, 28, TFT_NAVY);
+
+  // Stop name (yellow, left)
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_YELLOW, TFT_NAVY);
+  lcd.setCursor(6, 7);
+  if (stops[stopIdx].stopName != "") {
+    drawStringWithBu(stops[stopIdx].stopName, 6, 7, TFT_YELLOW);
+  } else {
+    lcd.print("Stop " + String(stopIdx + 1));
   }
+
+  // Route count badge (cyan) — middle-right
+  lcd.setTextColor(TFT_CYAN, TFT_NAVY);
+  lcd.setCursor(170, 7);
+  lcd.printf("%d 路線", stops[stopIdx].totalGroups);
+
+  // Current time (white) — right
+  lcd.setTextColor(TFT_WHITE, TFT_NAVY);
+  lcd.setCursor(245, 7);
+  lcd.print(getSystemTime());
+
+  // Page indicator (cyan) — far right
+  int totalPages = calculateTotalPages();
+  if (totalPages == 0) totalPages = 1;
+  if (totalPages > 1) {
+    lcd.setTextColor(TFT_CYAN, TFT_NAVY);
+    lcd.setCursor(290, 7);
+    lcd.printf("%d/%d", currentPage + 1, totalPages);
+  }
+
+  // === Separator ===
+  lcd.drawFastHLine(0, 28, 320, TFT_DARKGREY);
+
+  // === Bus rows (y=30 至 y=210, 5 rows × 36px) ===
+  if (groupCount == 0) {
+    lcd.setCursor(60, 110);
+    lcd.setTextColor(TFT_ORANGE, TFT_BLACK);
+    lcd.print("沒有實時巴士班次");
+    // Footer
+    lcd.drawFastHLine(0, 216, 320, TFT_DARKGREY);
+    lcd.setCursor(6, 220);
+    lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    lcd.printf("更新於 %s", getSystemTime().c_str());
+    return;
+  }
+
+  int yPosition = 30;
+  for (int i = groupStart; i < groupStart + groupCount; i++) {
+    drawBusLine(stops[stopIdx].groups[i], yPosition, false);
+    yPosition += 36;
+  }
+
+  // === Footer (y=216-240) ===
+  lcd.drawFastHLine(0, 216, 320, TFT_DARKGREY);
+  lcd.setCursor(6, 220);
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.printf("更新於 %s", getSystemTime().c_str());
+
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.setCursor(180, 220);
+  lcd.print("撳路線睇更多");
+}
+
+// =====================================================
+// Full-screen route detail page (撳 row 後展開) — v1.0.8
+//   顯示該 route 嘅全部 ETA (倒數分鐘 list)
+//   撳「← 返回」(x=4-50, y=0-36) → 關閉 expanded view
+// =====================================================
+void drawExpandedRoute(BusGroup& group, int stopIdx) {
+  lcd.fillScreen(TFT_BLACK);
+
+  // === Header bar ===
+  lcd.fillRect(0, 0, 320, 36, TFT_NAVY);
+
+  // 「← 返回」button (x=4-50, y=0-36)
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextColor(TFT_WHITE, TFT_NAVY);
+  lcd.setCursor(6, 10);
+  lcd.print("← 返回");
+
+  // Route + destination (yellow)
+  lcd.setCursor(58, 10);
+  lcd.setTextColor(TFT_YELLOW, TFT_NAVY);
+  lcd.printf("%s 往 %s", group.route.c_str(), group.dest.c_str());
+
+  // Sub-header (stop name)
+  lcd.setTextColor(TFT_CYAN, TFT_NAVY);
+  lcd.setCursor(58, 26);
+  if (stops[stopIdx].stopName != "") {
+    drawStringWithBu(stops[stopIdx].stopName, 58, 26, TFT_CYAN);
+  } else {
+    lcd.print("Stop " + String(stopIdx + 1));
+  }
+
+  lcd.drawFastHLine(0, 36, 320, TFT_DARKGREY);
+
+  // === ETA list ===
+  lcd.setFont(&fonts::efontTW_16);
+  lcd.setTextSize(1);
+
+  if (group.etaCount == 0) {
+    lcd.setCursor(60, 120);
+    lcd.setTextColor(TFT_ORANGE, TFT_BLACK);
+    lcd.print("沒有班次");
+    return;
+  }
+
+  int yPos = 80;
+  const int rowH = 40;
+  const int maxRows = 4;  // (240-80-header) / 40 = ~4 rows
+  for (int i = 0; i < group.etaCount && i < maxRows; i++) {
+    String etaTime = group.timeParts[i];
+    int minutesDiff = etaMinutesFromNow(etaTime);
+    String timeText = etaToRemainingText(minutesDiff);
+    uint16_t timeColor = etaToColor(minutesDiff);
+
+    // Row background: alternating subtle
+    uint16_t rowBg = (i % 2 == 0) ? TFT_BLACK : 0x0841;  // very dark grey
+    lcd.fillRect(0, yPos, 320, rowH, rowBg);
+
+    // Bus icon
+    drawBusIcon(10, yPos + 14, TFT_WHITE);
+
+    // ETA index (e.g. "1.", "2.")
+    lcd.setTextColor(TFT_DARKGREY, rowBg);
+    lcd.setCursor(34, yPos + 14);
+    lcd.printf("%d.", i + 1);
+
+    // Absolute time (white)
+    lcd.setTextColor(TFT_WHITE, rowBg);
+    lcd.setCursor(64, yPos + 14);
+    lcd.print(etaTime);
+
+    // Arrow → countdown
+    lcd.setTextColor(TFT_DARKGREY, rowBg);
+    lcd.setCursor(118, yPos + 14);
+    lcd.print("→");
+
+    // Countdown (colored by minutes)
+    lcd.setTextColor(timeColor, rowBg);
+    int tw = lcd.textWidth(timeText);
+    lcd.setCursor(316 - tw, yPos + 14);
+    lcd.print(timeText);
+
+    yPos += rowH;
+  }
+
+  // === Footer ===
+  lcd.drawFastHLine(0, 222, 320, TFT_DARKGREY);
+  lcd.setCursor(6, 226);
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  lcd.printf("共 %d 班 · 更新於 %s", group.etaCount, getSystemTime().c_str());
 }
 
 // =====================================================
@@ -2227,7 +2385,59 @@ void pollGPIO0Button() {
 //    如果日後想加 tap 功能 (例如撳兩下 LCD 入設定), 改呢度就得
 // =====================================================
 void checkTouchTap() {
-  // intentionally empty — v1.0.6 取消 tap toggle flip clock
+  static bool wasPressed = false;
+  static unsigned long lastTapMs = 0;
+  const unsigned long TAP_DEBOUNCE = 300;
+
+  bool pressed = touchIsPressed();
+
+  if (pressed && !wasPressed) {
+    wasPressed = true;
+  } else if (!pressed && wasPressed) {
+    wasPressed = false;
+    if (millis() - lastTapMs > TAP_DEBOUNCE) {
+      lastTapMs = millis();
+
+      // ✅ 如果 expanded route → 撳「← 返回」button (x=4-60, y=0-36) 退出
+      if (expandedRouteIdx >= 0) {
+        int tx, ty;
+        if (touchGetPoint(&tx, &ty)) {
+          if (tx < 60 && ty < 36) {
+            Serial.println("【Touch】退出 expanded route");
+            expandedRouteIdx = -1;
+            expandedStopIdx = -1;
+            displayCurrentPage();
+          }
+          // 其他位置: 唔做嘢 (避免誤撳退出)
+        }
+        return;
+      }
+
+      // ✅ Main page: 撳 row → expanded that route
+      int tx, ty;
+      if (touchGetPoint(&tx, &ty)) {
+        // Row y range: 30-210 (5 rows × 36px)
+        if (ty >= 30 && ty < 210) {
+          int rowIdx = (ty - 30) / 36;  // 0-4
+          int stopIdx, groupStart, groupCount;
+          getPageInfo(currentPage, stopIdx, groupStart, groupCount);
+          int targetGroup = groupStart + rowIdx;
+          if (targetGroup < groupStart + groupCount && targetGroup < stops[stopIdx].totalGroups) {
+            Serial.printf("【Touch】expanded route #%d (%s 往 %s)\n",
+                          targetGroup, stops[stopIdx].groups[targetGroup].route.c_str(),
+                          stops[stopIdx].groups[targetGroup].dest.c_str());
+            expandedRouteIdx = targetGroup;
+            expandedStopIdx = stopIdx;
+            displayCurrentPage();
+            return;
+          }
+        }
+      }
+
+      // 撳 footer / header → toggle flip clock (向後兼容舊行為)
+      toggleFlipClock();
+    }
+  }
 }
 
 // =====================================================
@@ -2445,8 +2655,10 @@ void loop() {
   pollGPIO0Button();
 
   // ==========================================
-  // Touch tap (anywhere on screen) → toggle flip clock
-  // Works in both bus data and clock mode (called before early return)
+  // Touch tap (v1.0.8):
+  //   - expanded route → tap「← 返回」button 退出
+  //   - main page row tap → expanded that route
+  //   - 其他位置 tap → toggle flip clock (向後兼容)
   // ==========================================
   checkTouchTap();
 
@@ -2471,59 +2683,8 @@ void loop() {
   int totalPages = calculateTotalPages();
   if (totalPages == 0) totalPages = 1;
 
-  // 跑馬燈更新
-  if (currentMillis - lastMarqueeUpdate >= marqueeInterval) {
-    // ✅ 天氣跑馬燈
-    if (weather.loaded && weather.needMarquee) {
-      weather.scrollX += scrollSpeed;
-      if (weather.scrollX >= (weather.textWidth + 40)) {
-        weather.scrollX = 0;
-      }
-      lcd.setFont(&fonts::efontTW_16);
-      lcd.setClipRect(0, 0, 320, 18);
-      // ✅ 唔再 fillRect 成條 strip (setTextColor 嘅 bg 已經會覆蓋 glyph 背景)
-      //    只清右邊 scrollSpeed 像素闊嘅殘留尾 (glyph 向左移之後嘅尾巴)
-      lcd.setTextColor(TFT_CYAN, TFT_BLACK);
-      int x1 = -(int)weather.scrollX;
-      int x2 = x1 + weather.textWidth + 40;
-      int trailW = (int)ceil(scrollSpeed) + 1;
-
-      // 清 copy 1 右邊嘅尾 (只清可視範圍)
-      int clearX1 = x1 + weather.textWidth;
-      if (clearX1 >= 0 && clearX1 < 320) {
-        lcd.fillRect(clearX1, 0, min(trailW, 320 - clearX1), 18, TFT_BLACK);
-      }
-      // 清 copy 2 右邊嘅尾 (如果 copy 2 有進入畫面)
-      int clearX2 = x2 + weather.textWidth;
-      if (clearX2 >= 0 && clearX2 < 320) {
-        lcd.fillRect(clearX2, 0, min(trailW, 320 - clearX2), 18, TFT_BLACK);
-      }
-
-      lcd.drawString(weather.summary, x1, 0);
-      // copy 2 喺可視範圍內先畫
-      if (x2 < 320) {
-        lcd.drawString(weather.summary, x2, 0);
-      }
-      lcd.clearClipRect();
-    }
-
-    int stopIdx, groupStart, groupCount;
-    getPageInfo(currentPage, stopIdx, groupStart, groupCount);
-
-    int yPosition = 48;
-    for (int i = groupStart; i < groupStart + groupCount; i++) {
-      BusGroup& group = stops[stopIdx].groups[i];
-      if (group.needMarquee) {
-        group.scrollX += scrollSpeed;
-        if (group.scrollX >= (group.textWidth + 40)) {
-          group.scrollX = 0;
-        }
-        drawBusLine(group, yPosition, true);
-      }
-      yPosition += 35;
-    }
-    lastMarqueeUpdate = currentMillis;
-  }
+  // ✅ v1.0.8: 新 design 冇跑馬燈, 唔需要 marquee update loop
+  //           (留低 lastMarqueeUpdate 純粹為咗向後兼容其他可能引用嘅 code)
 
   // ✅ 定期更新天氣 (15 分鐘)
   if (currentMillis - lastWeatherUpdate >= weatherInterval) {
@@ -2532,16 +2693,17 @@ void loop() {
     lastWeatherUpdate = currentMillis;
   }
 
-  // 時間更新 (每 10 秒)
-  // ⚠️ 清 190..265 而唔係 190..320: 265..320 係頁數指示器 "[1/3]",
-  //    舊 code 清足 130px 闊, 每 10 秒就會抹走頁數 (重疊/殘影 bug)
+  // ✅ v1.0.8: 時間更新 (每 10 秒) - 新 layout header bar (y=0-28) 入面
+  //   Header bar 已經 fillRect 過, 直接 redraw header 入面嘅時間部份就得
   if (currentMillis - lastClockUpdate >= 10000) {
-    int clearW = (totalPages > 1) ? 72 : 130;
-    lcd.fillRect(190, 22, clearW, 18, TFT_BLACK);  // 清除舊時間殘影
-    lcd.setFont(&fonts::efontTW_16);
-    lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-    lcd.setCursor(195, 24);
-    lcd.print(getSystemTime());
+    if (expandedRouteIdx < 0) {
+      // 只喺 main page 重畫 header 入面嘅時間
+      lcd.fillRect(240, 0, 80, 28, TFT_NAVY);  // 清舊時間殘影 (dark blue 底色)
+      lcd.setFont(&fonts::efontTW_16);
+      lcd.setTextColor(TFT_WHITE, TFT_NAVY);
+      lcd.setCursor(245, 7);
+      lcd.print(getSystemTime());
+    }
     lastClockUpdate = currentMillis;
   }
 
