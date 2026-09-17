@@ -86,6 +86,11 @@ git push origin main
 
 ### Changelog
 
+**v1.0.15** — Fix weather marquee (threshold + bitmap width) + red bus icon
+- **Bug 1 (天氣唔 scroll)**: `weather.needMarquee = (textWidth > 320)` 係舊 top-of-screen 嘅 threshold (320px)。新 footer 只有 210px 闊,大部分天氣字串 textWidth 200-300 → needMarquee = false → 永遠唔 scroll
+- Fix: 改 threshold 為 210 (footer 寬度);同時改用 `textWidthWithBu()` 計 bitmap overlay 寬度 (之前用 `lcd.textWidth()` 會少算 16px/每個 bitmap char)
+- **Bug 2 (巴士 icon 改紅色)**: 主頁 + expanded view 嘅 bus icon 改用 TFT_RED
+
 **v1.0.14** — Footer redesigned: only "更新於 HH:MM" + 天氣預報跑馬燈
 - 移除 footer 右邊 "撳路線睇更多" 提示 (唔再需要,row tap 行為已知)
 - 加返天氣預報跑馬燈喺 footer 右邊 (x=110-318, 208px 闊,cyan)

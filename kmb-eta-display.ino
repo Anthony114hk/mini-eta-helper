@@ -521,7 +521,7 @@ const long weatherInterval = 900000;   // 15 分鐘更新天氣
 // =====================================================
 // OTA — GitHub Releases
 // =====================================================
-#define FIRMWARE_VERSION   "1.0.14"                // 每次 release 之前人手改呢度 (對齊 git tag)
+#define FIRMWARE_VERSION   "1.0.15"                // 每次 release 之前人手改呢度 (對齊 git tag)
 #define GITHUB_USER        "Anthony114hk"          // GitHub username
 #define GITHUB_REPO        "mini-eta-helper"       // GitHub repo 名
 #define OTA_ASSET_NAME     "kmb-eta-display.bin"   // GitHub Release 上 .bin 檔名
@@ -1144,9 +1144,10 @@ void fetchWeather() {
     if (summary != "") {
       lcd.setFont(&fonts::efontTW_16);
       weather.summary = summary;
-      weather.textWidth = lcd.textWidth(summary);
+      weather.textWidth = textWidthWithBu(summary);  // ✅ v1.0.15: 計算 bitmap overlay 寬度
       weather.scrollX = 0;
-      weather.needMarquee = (weather.textWidth > 320);
+      // ✅ v1.0.15: 改用 footer 寬度 (210px),唔再係舊 top-of-screen 嘅 320px
+      weather.needMarquee = (weather.textWidth > 210);
       weather.loaded = true;
 
       Serial.printf("【天氣】%s (闊度 %d, 跑馬燈 %s)\n",
@@ -1222,8 +1223,8 @@ void drawBusLine(BusGroup& group, int yPos, bool clearFirst) {
     lcd.fillRect(0, yPos, 320, 36, TFT_BLACK);
   }
 
-  // Bus icon (16x12) @ x=6, y=yPos+10
-  drawBusIcon(6, yPos + 10, TFT_WHITE);
+  // Bus icon (16x12) @ x=6, y=yPos+10 — ✅ v1.0.15: 改用紅色
+  drawBusIcon(6, yPos + 10, TFT_RED);
 
   // Route number (cyan, efontTW_16)
   lcd.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -1447,8 +1448,8 @@ void drawExpandedRoute(BusGroup& group, int stopIdx) {
     uint16_t rowBg = (i % 2 == 0) ? TFT_BLACK : 0x0841;  // very dark grey
     lcd.fillRect(0, yPos, 320, rowH, rowBg);
 
-    // Bus icon
-    drawBusIcon(10, yPos + 14, TFT_WHITE);
+    // Bus icon ✅ v1.0.15: 改用紅色
+    drawBusIcon(10, yPos + 14, TFT_RED);
 
     // ETA index (e.g. "1.", "2.")
     lcd.setTextColor(TFT_DARKGREY, rowBg);
